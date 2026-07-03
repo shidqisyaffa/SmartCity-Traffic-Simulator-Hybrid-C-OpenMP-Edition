@@ -1,0 +1,9 @@
+# SmartCity Traffic Simulator - System Requirements
+# No external package installations (npm or pip) are required.
+# All operations rely on native Node.js libraries and standard C++ libraries.
+
+[System Toolchain Requirements]
+- OS: Windows 11
+- Compiler: GCC/G++ (via MSYS2 UCRT64) version 16.1.0 or higher (with OpenMP support)
+- Build Tool: GNU Make (mingw32-make) version 4.4.1 or higher
+- Runtime: Node.js (version 18.0.0 or higher)

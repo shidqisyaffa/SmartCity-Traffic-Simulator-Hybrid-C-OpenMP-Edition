@@ -1,0 +1,24 @@
+# Compiled Binaries
+*.exe
+*.o
+*.obj
+traffic_engine.exe
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# System Guides (Excluded as requested)
+development_rules.md
+project_spec.md
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# VS Code User State (Keep configurations we created, ignore local workspace state)
+.vscode/.history/
+.vscode/launch.json
+.vscode/tasks.json

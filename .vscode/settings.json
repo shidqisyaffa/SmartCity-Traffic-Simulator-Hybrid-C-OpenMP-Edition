@@ -1,0 +1,5 @@
+{
+    "clangd.arguments": [
+        "--query-driver=C:/msys64/ucrt64/bin/g++*"
+    ]
+}
