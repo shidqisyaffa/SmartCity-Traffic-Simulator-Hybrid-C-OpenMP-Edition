@@ -29,6 +29,14 @@ export class CanvasRenderer {
     // Interactive Selection
     this.selectedVehicleId = null;
     
+    // Interactive Edit Mode States
+    this.editMode = "select"; // select, add-node, remove-node, add-road, remove-road
+    this.selectedStartNodeId = null;
+    this.hoveredNodeId = null;
+    this.hoveredEdge = null;
+    this.mouseScreenX = 0;
+    this.mouseScreenY = 0;
+    
     // Toggle switch for Presentation Mode
     this.presentationMode = false;
 
@@ -230,6 +238,11 @@ export class CanvasRenderer {
         let roadColor = this.theme.road;
         let roadWidth = this.presentationMode ? 3.5 : 2;
 
+        const isHoveredEdge = this.hoveredEdge && (
+          (this.hoveredEdge.from === i && this.hoveredEdge.to === j) ||
+          (this.hoveredEdge.to === i && this.hoveredEdge.from === j)
+        );
+
         if (isBlocked) {
           roadColor = this.theme.roadBlocked;
           roadWidth = this.presentationMode ? 4 : 2.5;
@@ -240,6 +253,11 @@ export class CanvasRenderer {
           if (density > 0.6) {
             roadColor = density > 0.9 ? "#EF4444" : "#F97316";
           }
+        }
+
+        if (isHoveredEdge) {
+          roadColor = this.editMode === "remove-road" ? "#EF4444" : "#A5B4FC";
+          roadWidth = this.presentationMode ? 5 : 3.5;
         }
 
         this.ctx.strokeStyle = roadColor;
@@ -266,6 +284,22 @@ export class CanvasRenderer {
       }
     }
 
+    // Draw Road Creation Preview Line
+    if (this.editMode === "add-road" && this.selectedStartNodeId !== null) {
+      const uCoords = this.toScreen(
+        this.sim.graph.coords[this.selectedStartNodeId * 2],
+        this.sim.graph.coords[this.selectedStartNodeId * 2 + 1]
+      );
+      this.ctx.beginPath();
+      this.ctx.moveTo(uCoords.x, uCoords.y);
+      this.ctx.lineTo(this.mouseScreenX, this.mouseScreenY);
+      this.ctx.strokeStyle = "#F59E0B"; // Amber color for preview
+      this.ctx.lineWidth = this.presentationMode ? 3.0 : 1.5;
+      this.ctx.setLineDash([4, 4]);
+      this.ctx.stroke();
+      this.ctx.setLineDash([]);
+    }
+
     // 4. Draw Intersections (Nodes)
     for (let i = 0; i < V; i++) {
       if (this.sim.graph.activeNodes[i] !== 1) continue;
@@ -289,6 +323,27 @@ export class CanvasRenderer {
       this.ctx.stroke();
       
       this.ctx.shadowBlur = 0; // Reset shadow
+
+      // Selected start node highlight (cyan dashed pulse)
+      if (i === this.selectedStartNodeId) {
+        const pulseRadius = nodeRadius + 4 + Math.sin(Date.now() / 100) * 2;
+        this.ctx.beginPath();
+        this.ctx.arc(coords.x, coords.y, pulseRadius, 0, Math.PI * 2);
+        this.ctx.strokeStyle = "#06B6D4"; // Cyan 500
+        this.ctx.lineWidth = 2.5;
+        this.ctx.setLineDash([4, 2]);
+        this.ctx.stroke();
+        this.ctx.setLineDash([]);
+      }
+
+      // Hovered node highlight
+      if (i === this.hoveredNodeId) {
+        this.ctx.beginPath();
+        this.ctx.arc(coords.x, coords.y, nodeRadius + 3.5, 0, Math.PI * 2);
+        this.ctx.strokeStyle = this.editMode === "remove-node" ? "#EF4444" : "#A5B4FC";
+        this.ctx.lineWidth = 2.0;
+        this.ctx.stroke();
+      }
 
       // Label text
       this.ctx.fillStyle = this.theme.nodeText;

@@ -327,6 +327,18 @@
 
           <!-- Interactive CRUD Overlay -->
           <section class="graph-interactive-panel">
+            <h3>Graph Edit Mode</h3>
+            <div class="edit-mode-grid">
+              <button id="btn-mode-select" class="btn btn-secondary btn-sm active" style="grid-column: span 2;" title="Select elements / normal mode">🔍 Select Mode</button>
+              <button id="btn-mode-add-node" class="btn btn-secondary btn-sm" title="Click empty canvas to add a node">➕ Add Node</button>
+              <button id="btn-mode-remove-node" class="btn btn-secondary btn-sm" title="Click a node to remove it">❌ Remove Node</button>
+              <button id="btn-mode-add-road" class="btn btn-secondary btn-sm" title="Click start node then end node to connect">➕ Add Road</button>
+              <button id="btn-mode-remove-road" class="btn btn-secondary btn-sm" title="Click a road to remove it">❌ Remove Road</button>
+            </div>
+            <div id="edit-mode-help" class="description-text" style="font-size: 0.72rem; color: var(--text-secondary); margin-bottom: 8px;">
+              Active Mode: Select. Click on vehicle to highlight path.
+            </div>
+
             <h3>Manual Graph Intervention</h3>
             <div class="btn-group-row">
               <button id="btn-block-all" class="btn btn-secondary btn-sm">Block Random Road</button>
@@ -400,6 +412,46 @@
         </div>
       </aside>
     </main>
+  </div>
+  <!-- Graph Edit Modal (Add Edge Details) -->
+  <div id="edit-road-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <h3 class="modal-title">Create New Road</h3>
+      <div class="modal-body">
+        <p class="modal-desc">Connecting Node <span id="modal-node-from" class="highlight-val">?</span> to Node <span id="modal-node-to" class="highlight-val">?</span></p>
+        
+        <div class="form-group">
+          <label>Travel Cost (Weight):</label>
+          <input type="number" id="modal-road-weight" min="1" max="1000" value="10">
+        </div>
+        
+        <div class="form-group">
+          <label>Direction Type:</label>
+          <select id="modal-road-twoway">
+            <option value="twoway" selected>Two-Way Street</option>
+            <option value="oneway">One-Way Street (From → To)</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="modal-btn-cancel" class="btn btn-secondary btn-sm">Cancel</button>
+        <button id="modal-btn-create" class="btn btn-primary btn-sm">Create Road</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Custom Confirmation Modal -->
+  <div id="confirm-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <h3 id="confirm-title" class="modal-title">Confirm Action</h3>
+      <div class="modal-body">
+        <p id="confirm-message" class="modal-desc">Are you sure you want to proceed?</p>
+      </div>
+      <div class="modal-footer">
+        <button id="confirm-btn-cancel" class="btn btn-secondary btn-sm">Cancel</button>
+        <button id="confirm-btn-ok" class="btn btn-danger btn-sm">Confirm</button>
+      </div>
+    </div>
   </div>
 </body>
 </html>

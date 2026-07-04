@@ -654,6 +654,60 @@ void runBenchmark(std::string& out_json) {
     out_json = ss.str();
 }
 
+// Reroute active vehicles based on updated routing matrix (e.g. after graph edit)
+void rerouteActiveVehicles() {
+    #pragma omp parallel for schedule(static) if(totalVehicles > 500)
+    for (int i = 0; i < totalVehicles; ++i) {
+        int vOffset = i * 8;
+        int state = vehicleInts[vOffset + 2];
+        if (state != 1 && state != 2 && state != 3) continue;
+
+        int destination = vehicleInts[vOffset + 4];
+        int currentPathIndex = vehicleInts[vOffset + 5];
+        int pathLen = vehicleInts[vOffset + 6];
+        int vPathOffset = i * 100;
+
+        int u = vehiclePaths[vPathOffset + currentPathIndex];
+        int v = (currentPathIndex + 1 < pathLen) ? vehiclePaths[vPathOffset + currentPathIndex + 1] : u;
+
+        std::vector<int> remaining;
+        if (v >= 0 && v < MAX_VERTICES && activeNodes[v] == 1) {
+            remaining = reconstructPath(v, destination);
+        }
+
+        if (!remaining.empty()) {
+            int newPathLen = currentPathIndex + 1 + (remaining.size() - 1);
+            if (newPathLen <= 100) {
+                for (size_t p = 1; p < remaining.size(); ++p) {
+                    vehiclePaths[vPathOffset + currentPathIndex + p] = remaining[p];
+                }
+                vehicleInts[vOffset + 6] = newPathLen;
+                if (state == 3) {
+                    vehicleInts[vOffset + 2] = 1; // Unstick and resume movement
+                }
+            }
+        } else {
+            std::vector<int> fallback;
+            if (u >= 0 && u < MAX_VERTICES && activeNodes[u] == 1) {
+                fallback = reconstructPath(u, destination);
+            }
+            if (!fallback.empty()) {
+                vehicleInts[vOffset + 6] = fallback.size();
+                vehicleInts[vOffset + 5] = 0;
+                for (size_t p = 0; p < fallback.size(); ++p) {
+                    vehiclePaths[vPathOffset + p] = fallback[p];
+                }
+                vehicleFloats[vOffset] = 0.0f; // reset progress
+                if (state == 3) {
+                    vehicleInts[vOffset + 2] = 1;
+                }
+            } else {
+                vehicleInts[vOffset + 2] = 3; // Stuck
+            }
+        }
+    }
+}
+
 int main() {
     // Disable stdin/stdout synchronization for fast I/O
     std::ios_base::sync_with_stdio(false);
@@ -755,6 +809,9 @@ int main() {
             } else {
                 runSequentialFW(boundary, exec_time);
             }
+
+            // Recalculate paths for active vehicles
+            rerouteActiveVehicles();
 
             // Return active subgrid fwDistance and fwNext
             std::stringstream response;

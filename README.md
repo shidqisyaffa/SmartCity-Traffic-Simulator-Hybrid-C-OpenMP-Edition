@@ -60,6 +60,13 @@ Every intersection (vertex) features a simulated traffic light (0 = Green, 1 = R
 ### 3. Synchronization Overhead Measurement
 Timing inside OpenMP barriers is captured via high-resolution monotonic clocks (`omp_get_wtime`). This isolates computational runtime from thread synchronization/waiting overhead, providing precise input metrics for Amdahl's Law speedup graphs.
 
+### 4. Interactive Graph Editing & Dynamic Rerouting
+Users can modify the graph topology in real time (Add/Remove Intersection, Add/Remove Road with weights and lane directionality) when paused or stopped. Modifying the graph triggers:
+* Re-calculation of Floyd-Warshall route matrices via sequential/parallel modes.
+* Parallel C++ dynamic vehicle path recalculations (`rerouteActiveVehicles()`) from their next waypoints to their final destinations (no teleportation).
+* Automatic correction for high-DPI mouse scaling and ultrawide aspect ratio mappings (2560x1080).
+* Congestion statistics display freeze when simulation terminates, preserving peak metrics for presentations.
+
 ---
 
 ## 📂 Penjelasan Fungsi Setiap Berkas di Proyek Ini

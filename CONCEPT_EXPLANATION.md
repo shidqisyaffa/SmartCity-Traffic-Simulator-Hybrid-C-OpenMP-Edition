@@ -660,20 +660,33 @@ Teks analisis otomatis yang menjelaskan:
 
 ## 10. Manual Graph Intervention & Data Export
 
-### 10.1 Manual Graph Intervention
+### 10.1 Manual Graph & Topology Editing
 
-| Tombol | Fungsi |
-| :--- | :--- |
-| **Block Random Road** | Memblokir satu jalan secara acak. Kendaraan yang melewati jalan tersebut akan otomatis direroute menggunakan matriks FW yang dihitung ulang. |
-| **Clear All Blockages** | Membuka kembali semua jalan yang diblokir. Matriks FW dihitung ulang. |
+Selain pemblokiran jalan dinamis, sistem ini mendukung **Interactive Graph Editing** penuh yang memungkinkan pengguna untuk merestrukturisasi peta kota secara *real-time* saat simulasi sedang dihentikan (*paused/stopped*).
 
-**Fitur tambahan:** User juga bisa **klik langsung pada jalan** di Canvas untuk block/unblock jalan tertentu (hanya saat simulasi paused/stopped).
+#### 🖱️ Kontrol Edit Mode
+Pengguna dapat memilih salah satu mode pengeditan berikut dari panel **Graph Edit Mode** di sidebar kanan:
 
-**Pengaruh blockage:**
-- Floyd-Warshall dihitung ulang untuk menemukan rute alternatif
-- Kendaraan yang sedang di jalan terblokir otomatis mencari rute baru
-- Jika tidak ada rute alternatif → kendaraan menjadi **Stuck** (merah)
-- Statistik "Blocked Roads" di dashboard terupdate
+| Mode | Cara Penggunaan | Dampak Sistem & Sinkronisasi |
+| :--- | :--- | :--- |
+| **Select Mode** | • Klik pada jalan untuk memblokir/membuka jalan.<br>• Klik kendaraan untuk menyoroti jalurnya. | Mengubah status segment menjadi `blocked`. Memicu kalkulasi ulang matriks rute FW. |
+| **➕ Add Node** | Klik pada area kosong canvas (minimal berjarak 25px dari node lain). | Menambahkan persimpangan (*vertex*) baru pada graf. ID node baru otomatis dialokasikan dari slot kosong pertama. |
+| **❌ Remove Node** | Klik pada node yang ingin dihapus. Setujui konfirmasi pada modal. | Menghapus persimpangan beserta **seluruh jalan terhubung** (*incident edges*). Memicu rerouting instan bagi kendaraan terdampak. |
+| **➕ Add Road** | Klik node asal, lalu klik node tujuan. Atur bobot & tipe arah pada modal. | Menghubungkan dua persimpangan dengan jalan baru (Satu Arah atau Dua Arah). Menghitung ulang rute FW. |
+| **❌ Remove Road** | Klik pada segmen jalan yang ingin dihapus. Setujui konfirmasi modal. | Menghapus jalan penghubung secara permanen. Memicu kalkulasi ulang FW dan rerouting kendaraan. |
+
+#### ⚙️ Mekanisme Sinkronisasi & Dynamic Rerouting Backend C++
+Setiap kali topologi graf dimodifikasi di frontend (penambahan/penghapusan node atau jalan):
+1. **Pembaruan Memori Lokal JS**: Struktur graf di memori web diperbarui.
+2. **Kalkulasi Shortest Path Paralel**: Frontend mengirimkan sinyal pembaruan graf ke backend C++. Program backend menghapus matriks lama, memuat topologi baru, lalu mengeksekusi algoritma **Floyd-Warshall (Sequential/Parallel)** untuk memperbarui matriks pencarian rute terpendek (`fwDistance` dan `fwNext`).
+3. **Dynamic Rerouting Tanpa Teleportasi**: Fungsi backend `rerouteActiveVehicles()` secara paralel (menggunakan OpenMP) mendeteksi kendaraan aktif yang jalurnya terputus atau berubah. Rute perjalanan mereka dihitung ulang secara dinamis mulai dari target node berikutnya ke destinasi tujuan akhir tanpa efek lompatan (*teleportation*).
+4. **Dashboard Metrics Update**: Statistik jumlah node, edge, kerapatan graf (*graph density*), rata-rata derajat vertex (*average vertex degree*), dan status kemacetan langsung diperbarui secara *real-time*.
+
+#### 🛠️ Fitur Tambahan & Bug Fixes Presentasi
+- **Visual Feedback & Canvas Preview**: Saat menghubungkan jalan baru, garis putus-putus kuning tipis akan mengikuti kursor mouse dari node asal yang berdenyut (pulsing cyan ring). Node/jalan yang disorot akan memiliki efek bersinar/highlight merah atau amber.
+- **Monitor Ultrawide (Aspect Ratio Scaling)**: Input koordinat canvas dikonversi secara dinamis terhadap rasio resolusi internal `800x600` dengan ukuran display CSS. Mencegah bug misclick pada resolusi layar ultrawide (seperti 2560x1080).
+- **Jitter Protection**: Ambang batas drag ditingkatkan ke 5px untuk mencegah getaran kecil mouse membatalkan klik di canvas.
+- **Congestion Display Hold**: Ketika simulasi selesai, data puncak kemacetan terakhir tetap ditahan di dashboard (tidak langsung riset ke 0) agar memudahkan proses presentasi hasil simulasi kepada dosen penguji.
 
 ### 10.2 Data Export Modules
 

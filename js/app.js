@@ -107,6 +107,37 @@ document.addEventListener("DOMContentLoaded", async () => {
   const benchValSpeedup = document.getElementById("bench-val-speedup");
   const benchValEff = document.getElementById("bench-val-eff");
 
+  // Edit Mode Buttons
+  const btnModeSelect = document.getElementById("btn-mode-select");
+  const btnModeAddNode = document.getElementById("btn-mode-add-node");
+  const btnModeRemoveNode = document.getElementById("btn-mode-remove-node");
+  const btnModeAddRoad = document.getElementById("btn-mode-add-road");
+  const btnModeRemoveRoad = document.getElementById("btn-mode-remove-road");
+  const editHelpText = document.getElementById("edit-mode-help");
+
+  // Dialog Modals
+  const editRoadModal = document.getElementById("edit-road-modal");
+  const modalNodeFrom = document.getElementById("modal-node-from");
+  const modalNodeTo = document.getElementById("modal-node-to");
+  const modalRoadWeight = document.getElementById("modal-road-weight");
+  const modalRoadTwoway = document.getElementById("modal-road-twoway");
+  const modalBtnCancel = document.getElementById("modal-btn-cancel");
+  const modalBtnCreate = document.getElementById("modal-btn-create");
+
+  const confirmModal = document.getElementById("confirm-modal");
+  const confirmTitle = document.getElementById("confirm-title");
+  const confirmMessage = document.getElementById("confirm-message");
+  const confirmBtnCancel = document.getElementById("confirm-btn-cancel");
+  const confirmBtnOk = document.getElementById("confirm-btn-ok");
+
+  let confirmCallback = null;
+  let roadModalFrom = null;
+  let roadModalTo = null;
+
+  // Graph Editing States
+  let editMode = "select"; // select, add-node, remove-node, add-road, remove-road
+  let selectedStartNodeId = null;
+
   // Setup initial state
   updateUIForStatus("stopped");
   generatePresetGraph("grid"); // load grid by default
@@ -135,6 +166,173 @@ document.addEventListener("DOMContentLoaded", async () => {
   
   // Start drawing canvas
   renderLoop();
+
+  // ── Graph Edit Mode Handlers & Utilities ──────────────────────
+  function getClickedNode(mouseX, mouseY, maxDist = 15) {
+    const V = sim.getGraphBoundary();
+    let clickedNodeId = null;
+    let minDist = maxDist;
+    for (let i = 0; i < V; i++) {
+      if (sim.graph.activeNodes[i] !== 1) continue;
+      const nodeScreen = renderer.toScreen(sim.graph.coords[i * 2], sim.graph.coords[i * 2 + 1]);
+      const dist = Math.hypot(mouseX - nodeScreen.x, mouseY - nodeScreen.y);
+      if (dist < minDist) {
+        minDist = dist;
+        clickedNodeId = i;
+      }
+    }
+    return clickedNodeId;
+  }
+
+  function getClickedEdge(mouseX, mouseY, maxDist = 8) {
+    const V = sim.getGraphBoundary();
+    let clickedEdge = null;
+    let minDist = maxDist;
+    for (let i = 0; i < V; i++) {
+      if (sim.graph.activeNodes[i] !== 1) continue;
+      const uCoords = renderer.toScreen(sim.graph.coords[i * 2], sim.graph.coords[i * 2 + 1]);
+      for (let j = 0; j < V; j++) {
+        if (sim.graph.activeNodes[j] !== 1 || i === j) continue;
+        const w = sim.graph.weights[i * MAX_VERTICES + j];
+        if (w === Infinity) continue;
+
+        const vCoords = renderer.toScreen(sim.graph.coords[j * 2], sim.graph.coords[j * 2 + 1]);
+        const dx = vCoords.x - uCoords.x;
+        const dy = vCoords.y - uCoords.y;
+        const lenSq = dx * dx + dy * dy;
+        if (lenSq === 0) continue;
+
+        let t = ((mouseX - uCoords.x) * dx + (mouseY - uCoords.y) * dy) / lenSq;
+        t = Math.max(0, Math.min(1, t));
+
+        const nearestX = uCoords.x + t * dx;
+        const nearestY = uCoords.y + t * dy;
+        const dist = Math.hypot(mouseX - nearestX, mouseY - nearestY);
+        if (dist < minDist) {
+          minDist = dist;
+          clickedEdge = { from: i, to: j };
+        }
+      }
+    }
+    return clickedEdge;
+  }
+
+  function setEditMode(mode) {
+    if (sim.state === "running" && mode !== "select") {
+      notify("Please pause or stop simulation to edit the graph.");
+      return;
+    }
+
+    editMode = mode;
+    selectedStartNodeId = null;
+    renderer.editMode = mode;
+    renderer.selectedStartNodeId = null;
+    renderer.hoveredNodeId = null;
+    renderer.hoveredEdge = null;
+
+    const btns = [btnModeSelect, btnModeAddNode, btnModeRemoveNode, btnModeAddRoad, btnModeRemoveRoad];
+    btns.forEach(btn => {
+      if (btn) btn.classList.remove("active");
+    });
+
+    let activeBtn = null;
+    let helpText = "";
+    switch(mode) {
+      case "select":
+        activeBtn = btnModeSelect;
+        helpText = "Active Mode: Select. Click on vehicle to highlight path.";
+        break;
+      case "add-node":
+        activeBtn = btnModeAddNode;
+        helpText = "Active Mode: Add Node. Click empty space on canvas to place an intersection.";
+        break;
+      case "remove-node":
+        activeBtn = btnModeRemoveNode;
+        helpText = "Active Mode: Remove Node. Click an intersection to delete it.";
+        break;
+      case "add-road":
+        activeBtn = btnModeAddRoad;
+        helpText = "Active Mode: Add Road. Click start intersection then end intersection.";
+        break;
+      case "remove-road":
+        activeBtn = btnModeRemoveRoad;
+        helpText = "Active Mode: Remove Road. Click a road segment to delete it.";
+        break;
+    }
+    
+    if (activeBtn) activeBtn.classList.add("active");
+    if (editHelpText) editHelpText.textContent = helpText;
+    notify(`Switched to ${mode.toUpperCase()} mode.`);
+    renderer.draw();
+  }
+
+  if (btnModeSelect) btnModeSelect.addEventListener("click", () => setEditMode("select"));
+  if (btnModeAddNode) btnModeAddNode.addEventListener("click", () => setEditMode("add-node"));
+  if (btnModeRemoveNode) btnModeRemoveNode.addEventListener("click", () => setEditMode("remove-node"));
+  if (btnModeAddRoad) btnModeAddRoad.addEventListener("click", () => setEditMode("add-road"));
+  if (btnModeRemoveRoad) btnModeRemoveRoad.addEventListener("click", () => setEditMode("remove-road"));
+
+  function showConfirmModal(title, message, callback) {
+    confirmTitle.textContent = title;
+    confirmMessage.textContent = message;
+    confirmCallback = callback;
+    confirmModal.classList.remove("hidden");
+  }
+
+  function closeConfirmModal() {
+    confirmModal.classList.add("hidden");
+    confirmCallback = null;
+  }
+
+  if (confirmBtnCancel) confirmBtnCancel.addEventListener("click", () => {
+    closeConfirmModal();
+    notify("Action cancelled.");
+  });
+
+  if (confirmBtnOk) confirmBtnOk.addEventListener("click", () => {
+    if (confirmCallback) confirmCallback();
+    closeConfirmModal();
+  });
+
+  function showAddRoadModal(from, to) {
+    roadModalFrom = from;
+    roadModalTo = to;
+    modalNodeFrom.textContent = from;
+    modalNodeTo.textContent = to;
+    modalRoadWeight.value = 10;
+    modalRoadTwoway.value = "twoway";
+    editRoadModal.classList.remove("hidden");
+  }
+
+  function closeAddRoadModal() {
+    editRoadModal.classList.add("hidden");
+    selectedStartNodeId = null;
+    renderer.selectedStartNodeId = null;
+  }
+
+  if (modalBtnCancel) modalBtnCancel.addEventListener("click", () => {
+    closeAddRoadModal();
+    notify("Road creation cancelled.");
+  });
+
+  if (modalBtnCreate) modalBtnCreate.addEventListener("click", async () => {
+    const weight = parseFloat(modalRoadWeight.value);
+    const direction = modalRoadTwoway.value;
+    if (isNaN(weight) || weight <= 0) {
+      alert("Weight must be a positive number.");
+      return;
+    }
+    const isTwoWay = direction === "twoway";
+    
+    sim.graph.addEdge(roadModalFrom, roadModalTo, weight, isTwoWay);
+    closeAddRoadModal();
+    
+    notify("Synchronizing graph with backend...");
+    await sim.calculateShortestPaths();
+    updateGraphStatsPanel();
+    notify(`Road connection created between Intersection #${roadModalFrom} and #${roadModalTo}.`);
+    renderer.draw();
+  });
 
   // Helper: notify user in notifier box
   function notify(msg) {
@@ -181,12 +379,39 @@ document.addEventListener("DOMContentLoaded", async () => {
     renderer.isDragging = true;
     renderer.startX = e.clientX;
     renderer.startY = e.clientY;
+    renderer.hasDragged = false;
   });
 
   canvas.addEventListener("mousemove", (e) => {
-    if (!renderer.isDragging) return;
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const mouseY = (e.clientY - rect.top) * (canvas.height / rect.height);
+
+    renderer.mouseScreenX = mouseX;
+    renderer.mouseScreenY = mouseY;
+
+    if (!renderer.isDragging) {
+      if (editMode === "remove-node" || editMode === "add-road") {
+        renderer.hoveredNodeId = getClickedNode(mouseX, mouseY, 15);
+      } else {
+        renderer.hoveredNodeId = null;
+      }
+
+      if (editMode === "remove-road") {
+        renderer.hoveredEdge = getClickedEdge(mouseX, mouseY, 8);
+      } else {
+        renderer.hoveredEdge = null;
+      }
+
+      updateCursorStyle(mouseX, mouseY);
+      return;
+    }
+
     const dx = e.clientX - renderer.startX;
     const dy = e.clientY - renderer.startY;
+    if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
+      renderer.hasDragged = true;
+    }
     
     renderer.panX += dx;
     renderer.panY += dy;
@@ -198,6 +423,41 @@ document.addEventListener("DOMContentLoaded", async () => {
   window.addEventListener("mouseup", () => {
     renderer.isDragging = false;
   });
+
+  function updateCursorStyle(mouseX, mouseY) {
+    if (editMode === "select") {
+      const node = getClickedNode(mouseX, mouseY, 15);
+      const edge = getClickedEdge(mouseX, mouseY, 8);
+      if (node !== null || edge !== null) {
+        canvas.style.cursor = "pointer";
+      } else {
+        canvas.style.cursor = "default";
+      }
+    } else if (editMode === "add-node") {
+      canvas.style.cursor = "crosshair";
+    } else if (editMode === "remove-node") {
+      const node = getClickedNode(mouseX, mouseY, 15);
+      if (node !== null) {
+        canvas.style.cursor = "pointer";
+      } else {
+        canvas.style.cursor = "not-allowed";
+      }
+    } else if (editMode === "add-road") {
+      const node = getClickedNode(mouseX, mouseY, 15);
+      if (node !== null) {
+        canvas.style.cursor = "pointer";
+      } else {
+        canvas.style.cursor = "cell";
+      }
+    } else if (editMode === "remove-road") {
+      const edge = getClickedEdge(mouseX, mouseY, 8);
+      if (edge !== null) {
+        canvas.style.cursor = "pointer";
+      } else {
+        canvas.style.cursor = "not-allowed";
+      }
+    }
+  }
 
   // Handle mode select
   compModeSelect.addEventListener("change", () => {
@@ -238,11 +498,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   // Handle Load Graph
-  btnLoadGraph.addEventListener("click", () => {
+  btnLoadGraph.addEventListener("click", async () => {
     const type = presetSelect.value;
     generatePresetGraph(type);
     renderer.resetView(); // auto-center new topology
     sim.clearVehiclesMemory();
+    notify("Recomputing preset routing matrices...");
+    await sim.calculateShortestPaths();
     updateDashboardMetrics();
     updateGraphStatsPanel();
   });
@@ -394,6 +656,12 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Update Congestion metrics on dashboard
   function updateCongestionSummary() {
+    // Keep last active congestion stats when simulation is finished
+    // or when the last tick runs and all vehicles have just arrived (active = 0)
+    if (sim.state === "finished" || (sim.state === "running" && sim.activeVehicles === 0)) {
+      return;
+    }
+
     const V = sim.getGraphBoundary();
     if (V === 0) {
       congestionAvg.textContent = "0.0%";
@@ -579,105 +847,167 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Road intervention selection handler & Vehicle Selection Click
   canvas.addEventListener("mouseup", async (e) => {
     // If dragging has occurred, prevent processing click logic
-    if (renderer.isDragging) return;
+    if (renderer.hasDragged) return;
 
     const rect = canvas.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-
-    // A. Check if user clicked a vehicle first to select it
-    // Project mouse position back to graph coordinates
+    const mouseX = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const mouseY = (e.clientY - rect.top) * (canvas.height / rect.height);
     const clickedWorld = renderer.toWorld(mouseX, mouseY);
-    let selectedVehicleId = null;
-    let minVehicleDist = 12; // selection threshold radius in px
 
-    for (let i = 0; i < sim.totalVehicles; i++) {
-      const state = sim.vehicleIntsView[i * 8 + 2];
-      if (state !== 1 && state !== 2 && state !== 3) continue;
+    if (editMode === "select") {
+      let selectedVehicleId = null;
+      let minVehicleDist = 12; // selection threshold radius in px
 
-      const vx = sim.vehicleFloatsView[i * 8 + 3];
-      const vy = sim.vehicleFloatsView[i * 8 + 4];
-      const dist = Math.hypot(clickedWorld.x - vx, clickedWorld.y - vy);
-      
-      // Map back to screen distance
-      const screenDist = dist * renderer.scale * renderer.zoomLevel;
-      if (screenDist < minVehicleDist) {
-        minVehicleDist = screenDist;
-        selectedVehicleId = i;
-      }
-    }
+      for (let i = 0; i < sim.totalVehicles; i++) {
+        const state = sim.vehicleIntsView[i * 8 + 2];
+        if (state !== 1 && state !== 2 && state !== 3) continue;
 
-    if (selectedVehicleId !== null) {
-      renderer.selectedVehicleId = selectedVehicleId;
-      notify(`Selected Vehicle #${selectedVehicleId}. Active path highlighted.`);
-      renderer.draw();
-      return;
-    }
-
-    // B. Check if user clicked an edge to block/unblock
-    if (sim.state === "running") {
-      notify("Please pause or stop simulation to block/unblock roads.");
-      return;
-    }
-
-    const V = sim.getGraphBoundary();
-    let clickedEdge = null;
-    let minEdgeDistance = 8; // edge line click radius in px
-
-    for (let i = 0; i < V; i++) {
-      if (sim.graph.activeNodes[i] !== 1) continue;
-      const uCoords = renderer.toScreen(sim.graph.coords[i * 2], sim.graph.coords[i * 2 + 1]);
-
-      for (let j = 0; j < V; j++) {
-        if (sim.graph.activeNodes[j] !== 1 || i === j) continue;
-        const w = sim.graph.weights[i * MAX_VERTICES + j];
-        if (w === Infinity) continue;
-
-        const vCoords = renderer.toScreen(sim.graph.coords[j * 2], sim.graph.coords[j * 2 + 1]);
-
-        // Segment projection calculations
-        const dx = vCoords.x - uCoords.x;
-        const dy = vCoords.y - uCoords.y;
-        const lenSq = dx * dx + dy * dy;
-        if (lenSq === 0) continue;
-
-        let t = ((mouseX - uCoords.x) * dx + (mouseY - uCoords.y) * dy) / lenSq;
-        t = Math.max(0, Math.min(1, t));
-
-        const nearestX = uCoords.x + t * dx;
-        const nearestY = uCoords.y + t * dy;
-
-        const dist = Math.hypot(mouseX - nearestX, mouseY - nearestY);
-        if (dist < minEdgeDistance) {
-          minEdgeDistance = dist;
-          clickedEdge = { from: i, to: j };
+        const vx = sim.vehicleFloatsView[i * 8 + 3];
+        const vy = sim.vehicleFloatsView[i * 8 + 4];
+        const dist = Math.hypot(clickedWorld.x - vx, clickedWorld.y - vy);
+        
+        const screenDist = dist * renderer.scale * renderer.zoomLevel;
+        if (screenDist < minVehicleDist) {
+          minVehicleDist = screenDist;
+          selectedVehicleId = i;
         }
       }
-    }
 
-    if (clickedEdge) {
-      const from = clickedEdge.from;
-      const to = clickedEdge.to;
-      const isBlocked = sim.graph.isBlocked(from, to);
-
-      if (isBlocked) {
-        sim.graph.unblockRoad(from, to, true); // unblock two-way
-        notify(`Road segment ${from} ➔ ${to} Unblocked.`);
-      } else {
-        sim.graph.blockRoad(from, to, true); // block two-way
-        notify(`Road segment ${from} ➔ ${to} Blocked! Dynamic rerouting triggered.`);
+      if (selectedVehicleId !== null) {
+        renderer.selectedVehicleId = selectedVehicleId;
+        notify(`Selected Vehicle #${selectedVehicleId}. Active path highlighted.`);
+        renderer.draw();
+        return;
       }
 
-      // Recalculate shortest path matrices dynamically
-      notify("Recalculating routing matrices...");
-      const t = await sim.calculateShortestPaths();
-      notify(`Routing matrices updated in ${t.toFixed(2)}ms.`);
+      if (sim.state === "running") {
+        notify("Please pause or stop simulation to block/unblock roads.");
+        return;
+      }
+
+      const clickedEdge = getClickedEdge(mouseX, mouseY, 8);
+      if (clickedEdge) {
+        const from = clickedEdge.from;
+        const to = clickedEdge.to;
+        const isBlocked = sim.graph.isBlocked(from, to);
+
+        if (isBlocked) {
+          sim.graph.unblockRoad(from, to, true); // unblock two-way
+          notify(`Road segment ${from} ➔ ${to} Unblocked.`);
+        } else {
+          sim.graph.blockRoad(from, to, true); // block two-way
+          notify(`Road segment ${from} ➔ ${to} Blocked! Dynamic rerouting triggered.`);
+        }
+
+        notify("Recalculating routing matrices...");
+        const t = await sim.calculateShortestPaths();
+        notify(`Routing matrices updated in ${t.toFixed(2)}ms.`);
+        updateGraphStatsPanel();
+        renderer.draw();
+      } else {
+        renderer.selectedVehicleId = null;
+        renderer.draw();
+      }
+    } 
+    else if (editMode === "add-node") {
+      if (sim.state === "running") {
+        notify("Please pause or stop simulation to edit the graph.");
+        return;
+      }
+
+      const nearNode = getClickedNode(mouseX, mouseY, 25);
+      if (nearNode !== null) {
+        notify("Too close to an existing node. Choose an empty space.");
+        return;
+      }
+
+      let newNodeId = -1;
+      for (let i = 0; i < MAX_VERTICES; i++) {
+        if (sim.graph.activeNodes[i] !== 1) {
+          newNodeId = i;
+          break;
+        }
+      }
+
+      if (newNodeId === -1) {
+        notify("Maximum node limit reached.");
+        return;
+      }
+
+      sim.graph.addVertex(newNodeId, clickedWorld.x, clickedWorld.y);
+      notify(`Added Intersection #${newNodeId} at (${clickedWorld.x.toFixed(1)}, ${clickedWorld.y.toFixed(1)}).`);
+      
+      await sim.calculateShortestPaths();
       updateGraphStatsPanel();
       renderer.draw();
-    } else {
-      // Clear selection if clicked blank space
-      renderer.selectedVehicleId = null;
+    } 
+    else if (editMode === "remove-node") {
+      if (sim.state === "running") {
+        notify("Please pause or stop simulation to edit the graph.");
+        return;
+      }
+
+      const node = getClickedNode(mouseX, mouseY, 15);
+      if (node === null) return;
+
+      showConfirmModal(
+        "Remove Intersection",
+        `Are you sure you want to remove Intersection #${node}? This will also delete all connected roads.`,
+        async () => {
+          sim.graph.removeVertex(node);
+          notify(`Intersection #${node} and its connections removed.`);
+          await sim.calculateShortestPaths();
+          updateGraphStatsPanel();
+          renderer.draw();
+        }
+      );
+    } 
+    else if (editMode === "add-road") {
+      if (sim.state === "running") {
+        notify("Please pause or stop simulation to edit the graph.");
+        return;
+      }
+
+      const node = getClickedNode(mouseX, mouseY, 15);
+      if (node === null) return;
+
+      if (selectedStartNodeId === null) {
+        selectedStartNodeId = node;
+        renderer.selectedStartNodeId = node;
+        notify(`Selected Node #${node} as origin. Click target node to connect.`);
+      } else {
+        if (selectedStartNodeId === node) {
+          selectedStartNodeId = null;
+          renderer.selectedStartNodeId = null;
+          notify("Cancelled connection.");
+          renderer.draw();
+          return;
+        }
+
+        showAddRoadModal(selectedStartNodeId, node);
+      }
       renderer.draw();
+    } 
+    else if (editMode === "remove-road") {
+      if (sim.state === "running") {
+        notify("Please pause or stop simulation to edit the graph.");
+        return;
+      }
+
+      const edge = getClickedEdge(mouseX, mouseY, 8);
+      if (!edge) return;
+
+      showConfirmModal(
+        "Remove Road",
+        `Are you sure you want to remove the road segment between Intersection #${edge.from} and #${edge.to}?`,
+        async () => {
+          sim.graph.removeEdge(edge.from, edge.to, true);
+          notify(`Road segment between #${edge.from} and #${edge.to} removed.`);
+          await sim.calculateShortestPaths();
+          updateGraphStatsPanel();
+          renderer.draw();
+        }
+      );
     }
   });
 
