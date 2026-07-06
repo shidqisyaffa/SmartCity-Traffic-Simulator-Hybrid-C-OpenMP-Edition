@@ -1193,13 +1193,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       csvContent += `${p},${t_p_str},${s_str},${e_str},${overhead_str}\n`;
     }
       
-      if (maxSpeedup > 0) {
-        csvContent += `\nOptimal Thread Count,${optimalThread} (Speedup: ${maxSpeedup.toFixed(2)}x)\n\n`;
-      } else {
-        csvContent += `\nOptimal Thread Count,N/A\n\n`;
-      }
+    if (maxSpeedup > 0) {
+      csvContent += `\nOptimal Thread Count,${optimalThread} (Speedup: ${maxSpeedup.toFixed(2)}x)\n\n`;
     } else {
-      csvContent += "Performance data not available (make sure backend is running)\n\n";
+      csvContent += `\nOptimal Thread Count,N/A\n\n`;
     }
 
     // Section 2: Vehicle Journey Statistics
