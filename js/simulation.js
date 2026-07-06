@@ -213,6 +213,18 @@ export class Simulation {
   }
 
   /**
+   * Clears vehicles memory on both frontend and C++ backend.
+   */
+  async clearVehicles() {
+    this.clearVehiclesMemory();
+    try {
+      await this.sendRequest("SPAWN 0 0", "SPAWN");
+    } catch (err) {
+      console.error("Failed to clear backend vehicles:", err);
+    }
+  }
+
+  /**
    * Dummy worker pool initializer (maintained for signature compatibility).
    */
   async initializeWorkerPool() {
@@ -454,10 +466,67 @@ export class Simulation {
   /**
    * Reset simulation states.
    */
-  reset() {
+  async reset() {
     this.state = "stopped";
     this.tickCount = 0;
-    this.clearVehiclesMemory();
+
+    try {
+      const response = await this.sendRequest("RESET", "RESET");
+      if (response && response.status === "success") {
+        const ints = response.vehicleInts || [];
+        const floats = response.vehicleFloats || [];
+        for (let i = 0; i < ints.length; i++) {
+          this.vehicleIntsView[i] = ints[i];
+        }
+        for (let i = 0; i < floats.length; i++) {
+          this.vehicleFloatsView[i] = floats[i];
+        }
+      }
+    } catch (err) {
+      console.error("Failed to reset backend simulation:", err);
+    }
+
+    this.activeVehicles = this.totalVehicles;
+    this.metrics.totalFinished = 0;
+    this.metrics.throughput = 0;
+  }
+
+  /**
+   * Spawns a manual vehicle count with optional custom origin/target.
+   */
+  async addManualVehicles(count, origin = -1, target = -1) {
+    const response = await this.sendRequest(`ADD_VEHICLES ${count} ${origin} ${target}`, "ADD_VEHICLES");
+    
+    if (response && response.status === "success") {
+      this.totalVehicles = response.totalVehicles;
+      this.activeVehicles = response.totalVehicles; // Reset active count to include new ones
+      
+      const ints = response.vehicleInts;
+      const floats = response.vehicleFloats;
+      const paths = response.vehiclePaths;
+
+      // Update Shared Memory views
+      for (let i = 0; i < ints.length; i++) {
+        this.vehicleIntsView[i] = ints[i];
+      }
+      for (let i = 0; i < floats.length; i++) {
+        this.vehicleFloatsView[i] = floats[i];
+      }
+      for (let i = 0; i < paths.length; i++) {
+        this.vehiclePathsView[i] = paths[i];
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Runs scientific isolated C++ Floyd-Warshall benchmark loop on current graph layout
+   */
+  async runCurrentGraphBenchmark() {
+    const V = this.getGraphBoundary();
+    if (V === 0) return null;
+    return await this.sendRequest(`BENCHMARK_CURRENT ${V}`, "BENCHMARK_CURRENT");
   }
 
   /**

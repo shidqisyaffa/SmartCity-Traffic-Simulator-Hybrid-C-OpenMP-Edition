@@ -32,6 +32,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   const btnLoadGraph = document.getElementById("btn-load-graph");
   const vehicleSelect = document.getElementById("vehicle-count");
   const btnSpawnVehicles = document.getElementById("btn-spawn-vehicles");
+  const btnAddVehicleManual = document.getElementById("btn-add-vehicle-manual");
+  const manualVehCountInput = document.getElementById("manual-veh-count");
+  const manualVehOriginSelect = document.getElementById("manual-veh-origin");
+  const manualVehTargetSelect = document.getElementById("manual-veh-target");
   
   const btnStart = document.getElementById("btn-start");
   const btnPause = document.getElementById("btn-pause");
@@ -502,7 +506,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const type = presetSelect.value;
     generatePresetGraph(type);
     renderer.resetView(); // auto-center new topology
-    sim.clearVehiclesMemory();
+    await sim.clearVehicles();
     notify("Recomputing preset routing matrices...");
     await sim.calculateShortestPaths();
     updateDashboardMetrics();
@@ -525,6 +529,51 @@ document.addEventListener("DOMContentLoaded", async () => {
     updateDashboardMetrics();
     notify(`Spawned ${sim.totalVehicles} vehicles. Ready to simulate.`);
   });
+
+  // Handle Manual Vehicle Spawner
+  if (btnAddVehicleManual) {
+    btnAddVehicleManual.addEventListener("click", async () => {
+      const count = parseInt(manualVehCountInput.value);
+      if (isNaN(count) || count <= 0) {
+        alert("Please enter a valid positive number.");
+        return;
+      }
+      
+      const V = sim.getGraphBoundary();
+      if (V < 2) {
+        notify("Need at least 2 active intersections to spawn and route vehicles.");
+        return;
+      }
+
+      const origin = parseInt(manualVehOriginSelect.value);
+      const target = parseInt(manualVehTargetSelect.value);
+
+      if (origin !== -1 && target !== -1 && origin === target) {
+        alert("Start and destination nodes cannot be the same intersection.");
+        return;
+      }
+
+      btnAddVehicleManual.disabled = true;
+      notify("Calculating path matrices...");
+      await sim.calculateShortestPaths();
+      
+      notify(`Spawning ${count} vehicles manually...`);
+      const success = await sim.addManualVehicles(count, origin, target);
+      
+      btnAddVehicleManual.disabled = false;
+      if (success) {
+        // If simulation was finished, reset state to running or paused to allow continued simulation!
+        if (sim.state === "finished" && sim.activeVehicles > 0) {
+          updateUIForStatus("paused"); // allow resume
+        }
+        updateDashboardMetrics();
+        notify(`Manually spawned ${count} vehicles. Total: ${sim.totalVehicles}.`);
+      } else {
+        notify("Failed to spawn vehicles. Make sure graph is connected.");
+      }
+      renderer.draw();
+    });
+  }
 
   // Tab switching
   tabLive.addEventListener("click", () => {
@@ -576,8 +625,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     updateThreadVisuals();
   });
 
-  btnReset.addEventListener("click", () => {
-    sim.reset();
+  btnReset.addEventListener("click", async () => {
+    await sim.reset();
     renderer.selectedVehicleId = null; // Clear selection
     updateUIForStatus("stopped");
     notify("Simulation reset. All metrics cleared.");
@@ -735,6 +784,30 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Update Graph Statistics widget values
   function updateGraphStatsPanel() {
     const V = sim.getGraphBoundary();
+
+    // Populate manual vehicle spawner dropdowns with active nodes
+    if (manualVehOriginSelect && manualVehTargetSelect) {
+      const prevOrigin = manualVehOriginSelect.value;
+      const prevTarget = manualVehTargetSelect.value;
+      
+      let html = `<option value="-1">Random</option>`;
+      for (let i = 0; i < V; i++) {
+        if (sim.graph.activeNodes[i] === 1) {
+          html += `<option value="${i}">Intersection #${i}</option>`;
+        }
+      }
+      
+      manualVehOriginSelect.innerHTML = html;
+      manualVehTargetSelect.innerHTML = html;
+      
+      // Restore selections if still valid
+      manualVehOriginSelect.value = prevOrigin;
+      if (manualVehOriginSelect.value !== prevOrigin) manualVehOriginSelect.value = "-1";
+      
+      manualVehTargetSelect.value = prevTarget;
+      if (manualVehTargetSelect.value !== prevTarget) manualVehTargetSelect.value = "-1";
+    }
+
     if (V === 0) {
       statNodesEdges.textContent = "0 / 0";
       statDensity.textContent = "0.0%";
@@ -1057,13 +1130,76 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   // Export CSV
-  btnExportCsv.addEventListener("click", () => {
+  btnExportCsv.addEventListener("click", async () => {
     if (sim.totalVehicles === 0) {
       notify("No vehicle journey logs found.");
       return;
     }
 
-    let csvContent = "data:text/csv;charset=utf-8,";
+    notify("Running performance benchmark on current map layout...");
+    btnExportCsv.disabled = true;
+    
+    let benchmarkData = null;
+    try {
+      benchmarkData = await sim.runCurrentGraphBenchmark();
+    } catch (err) {
+      console.error("Failed to run benchmark on current graph:", err);
+    }
+    
+    btnExportCsv.disabled = false;
+    notify("Generating CSV report...");
+
+    let csvContent = "\ufeff"; // BOM for Excel UTF-8 compatibility
+    
+    // Section 1: Computational Performance Analysis
+    csvContent += "--- COMPUTATIONAL PERFORMANCE ANALYSIS (FLOYD-WARSHALL) ---\n";
+    csvContent += "Graph size (V intersections)," + sim.getGraphBoundary() + "\n";
+    if (benchmarkData && benchmarkData.status === "success") {
+      csvContent += "Sequential Execution Time (ms)," + benchmarkData.seq_time.toFixed(4) + "\n\n";
+      csvContent += "Thread Count (P),Execution Time (T_P) (ms),Speedup (S),Efficiency (E) (%),Sync Overhead (ms)\n";
+      
+      let maxSpeedup = -1;
+      let optimalThread = 1;
+      
+      for (let i = 0; i < benchmarkData.threads.length; i++) {
+        const p = benchmarkData.threads[i];
+        const t_p = benchmarkData.times[i];
+        const overhead = benchmarkData.overheads[i];
+        
+        let t_p_str = t_p.toFixed(4);
+        let s_str = "N/A";
+        let e_str = "N/A";
+        let overhead_str = overhead.toFixed(4);
+
+        if (t_p > 0) {
+          const s = benchmarkData.seq_time / t_p;
+          const e = (s / p) * 100;
+          s_str = s.toFixed(4);
+          e_str = e.toFixed(2) + "%";
+          
+          if (s > maxSpeedup) {
+            maxSpeedup = s;
+            optimalThread = p;
+          }
+        } else {
+          t_p_str = "N/A (Oversubscribed / Skipped)";
+          overhead_str = "N/A";
+        }
+        
+        csvContent += `${p},${t_p_str},${s_str},${e_str},${overhead_str}\n`;
+      }
+      
+      if (maxSpeedup > 0) {
+        csvContent += `\nOptimal Thread Count,${optimalThread} (Speedup: ${maxSpeedup.toFixed(2)}x)\n\n`;
+      } else {
+        csvContent += `\nOptimal Thread Count,N/A\n\n`;
+      }
+    } else {
+      csvContent += "Performance data not available (make sure backend is running)\n\n";
+    }
+
+    // Section 2: Vehicle Journey Statistics
+    csvContent += "--- VEHICLE JOURNEY STATISTICS ---\n";
     csvContent += "Vehicle ID,Vehicle Type,State Code,Origin,Destination,Progress (%),Travel Time (s)\n";
 
     for (let i = 0; i < sim.totalVehicles; i++) {
@@ -1083,19 +1219,24 @@ document.addEventListener("DOMContentLoaded", async () => {
       csvContent += `${id},${typeStr},${stateStr},${origin},${destination},${progress.toFixed(1)}%,${travelTime.toFixed(2)}\n`;
     }
 
-    const encodedUri = encodeURI(csvContent);
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = encodedUri;
-    a.download = `smartcity_statistics_${Date.now()}.csv`;
+    a.href = url;
+    a.download = `smartcity_performance_and_statistics_${Date.now()}.csv`;
     a.click();
-    notify("Vehicles statistics CSV downloaded.");
+    notify("Performance and vehicle statistics CSV downloaded successfully.");
   });
 
   // Graph generators presets
   function generatePresetGraph(type) {
     sim.graph.clear();
     
-    if (type === "grid") {
+    if (type === "blank") {
+      setEditMode("add-node");
+      notify("Blank canvas loaded. Click empty space on canvas to place an intersection.");
+    }
+    else if (type === "grid") {
       // 7x7 grid (49 nodes)
       const size = 7;
       let id = 0;
@@ -1275,46 +1416,103 @@ document.addEventListener("DOMContentLoaded", async () => {
       for (let i = 0; i < results.threads.length; i++) {
         const tVal = results.threads[i];
         const pTime = results.times[i];
-        if (pTime < bestParTime) bestParTime = pTime;
-
-        const s_p = sequentialBaseline / pTime;
-        const e_p = s_p / tVal;
         
-        if (s_p > maxSpeedup) {
-          maxSpeedup = s_p;
-          optimalThreads = tVal;
+        let s_p = 0;
+        let e_p = 0;
+
+        if (pTime > 0) {
+          if (pTime < bestParTime) bestParTime = pTime;
+          s_p = sequentialBaseline / pTime;
+          e_p = s_p / tVal;
+
+          if (s_p > maxSpeedup) {
+            maxSpeedup = s_p;
+            optimalThreads = tVal;
+          }
         }
 
         results.speedup.push(s_p);
         results.efficiency.push(e_p);
       }
 
+      if (bestParTime === Infinity) bestParTime = 0;
+      if (maxSpeedup === -1) maxSpeedup = 0;
+
       // Render stats cards
       benchValSeq.textContent = sequentialBaseline.toFixed(1) + " ms";
-      benchValPar.textContent = bestParTime.toFixed(1) + " ms";
-      benchValSpeedup.textContent = maxSpeedup.toFixed(2) + "x";
+      benchValPar.textContent = bestParTime > 0 ? bestParTime.toFixed(1) + " ms" : "N/A";
+      benchValSpeedup.textContent = maxSpeedup > 0 ? maxSpeedup.toFixed(2) + "x" : "N/A";
       
-      const peakEff = Math.round(results.efficiency[results.speedup.indexOf(maxSpeedup)] * 100);
-      benchValEff.textContent = peakEff + "%";
+      const peakEffIdx = results.speedup.indexOf(maxSpeedup);
+      const peakEff = (maxSpeedup > 0 && peakEffIdx !== -1) ? Math.round(results.efficiency[peakEffIdx] * 100) : 0;
+      benchValEff.textContent = peakEff > 0 ? peakEff + "%" : "N/A";
 
       // Render scientific custom SVG charts
       renderSVGCharts(sequentialBaseline, results);
       
       // Draw Amdahl's Law automatically
       const s4 = results.speedup[2]; // 4 threads speedup
-      const f = Math.max(0, ((1 / s4) - 0.25) / 0.75);
+      const rawF = s4 > 0 ? ((1 / s4) - 0.25) / 0.75 : 0;
+      const f = Math.min(1.0, Math.max(0.0, rawF));
 
       const peakIdx = results.speedup.indexOf(maxSpeedup);
-      const peakOverhead = results.overheads[peakIdx];
+      const peakOverhead = (peakIdx !== -1) ? results.overheads[peakIdx] : 0;
 
-      amdahlAnalysis.innerHTML = `
-        Hasil benchmark menunjukkan waktu eksekusi sekuensial C++ adalah <strong>${sequentialBaseline.toFixed(1)} ms</strong>. 
-        Kecepatan puncak (Max Speedup) sebesar <strong>${maxSpeedup.toFixed(2)}x</strong> dicapai pada alokasi <strong>${optimalThreads} thread</strong>.
-        <br><br>
-        Berdasarkan <strong>Hukum Amdahl</strong>, estimasi fraksi serial sistem ini adalah <strong>${(f * 100).toFixed(1)}%</strong>. 
-        Rata-rata waktu sinkronisasi overhead (Synchronization Overhead Time) pada thread puncak adalah <strong>${peakOverhead.toFixed(2)} ms</strong>.
-        Hal ini mengonfirmasi adanya parallel overhead (manajemen barrier konkurensi OpenMP dan dynamic loop scheduling) yang membatasi speedup linear pada core CPU yang tinggi.
-      `;
+      if (maxSpeedup > 0) {
+        let serialExplanation = "";
+        if (f >= 1.0) {
+          serialExplanation = `Berdasarkan <strong>Hukum Amdahl</strong>, estimasi fraksi serial sistem ini adalah <strong>100.0%</strong>. Hal ini dikarenakan ukuran beban kerja graf saat ini terlalu kecil (V=${sim.getGraphBoundary()} nodes) sehingga overhead inisialisasi thread paralel OpenMP mendominasi seluruh waktu komputasi, menyebabkan perlambatan dibanding baseline sekuensial.`;
+        } else {
+          serialExplanation = `Berdasarkan <strong>Hukum Amdahl</strong>, estimasi fraksi serial sistem ini adalah <strong>${(f * 100).toFixed(1)}%</strong>. Rata-rata waktu sinkronisasi overhead (Synchronization Overhead Time) pada thread puncak adalah <strong>${peakOverhead.toFixed(2)} ms</strong>.`;
+        }
+
+        // Add math explanation card!
+        const t4Val = results.times[2];
+        const s4Val = results.speedup[2];
+        let mathStepsHtml = "";
+        
+        if (t4Val > 0) {
+          mathStepsHtml = `
+            <div style="margin-top: 12px; padding: 12px; background: rgba(17, 24, 39, 0.4); border-radius: 8px; border: 1px solid var(--border-glass); font-family: monospace; font-size: 0.8rem; color: var(--text-secondary); line-height: 1.4;">
+              <strong style="color: var(--text-primary);">📊 Langkah Kalkulasi Matematis (P = 4 Thread):</strong><br>
+              1. Rumus Amdahl: S_p = 1 / [ f + (1 - f) / P ]<br>
+              2. Mengisolasi f (pada P = 4):<br>
+              &nbsp;&nbsp;&nbsp;f = ((1 / S_4) - 0.25) / 0.75<br>
+              3. Data Pengukuran:<br>
+              &nbsp;&nbsp;&nbsp;- T_seq = ${sequentialBaseline.toFixed(4)} ms<br>
+              &nbsp;&nbsp;&nbsp;- T_par (4T) = ${t4Val.toFixed(4)} ms<br>
+              &nbsp;&nbsp;&nbsp;- Speedup (S_4) = T_seq / T_4 = ${sequentialBaseline.toFixed(4)} / ${t4Val.toFixed(4)} = ${s4Val.toFixed(4)}x<br>
+              4. Kalkulasi:<br>
+              &nbsp;&nbsp;&nbsp;f = ((1 / ${s4Val.toFixed(4)}) - 0.25) / 0.75 = ${rawF.toFixed(4)}<br>
+              &nbsp;&nbsp;&nbsp;f_persen = ${(rawF * 100).toFixed(2)}% ${rawF > 1.0 ? "(Dibatasi maks 100% secara fisik)" : rawF < 0 ? "(Dibatasi min 0% secara fisik)" : ""}<br>
+              &nbsp;&nbsp;&nbsp;f_akhir = ${(f * 100).toFixed(1)}%
+            </div>
+          `;
+        } else {
+          mathStepsHtml = `
+            <div style="margin-top: 12px; padding: 12px; background: rgba(17, 24, 39, 0.4); border-radius: 8px; border: 1px solid var(--border-glass); font-family: monospace; font-size: 0.8rem; color: var(--text-secondary); line-height: 1.4;">
+              <strong style="color: var(--text-primary);">📊 Langkah Kalkulasi Matematis:</strong><br>
+              Kalkulasi langkah dinonaktifkan karena konfigurasi paralel 4 Thread dilewati (oversubscribed) pada perangkat keras ini.
+            </div>
+          `;
+        }
+
+        amdahlAnalysis.innerHTML = `
+          Hasil benchmark menunjukkan waktu eksekusi sekuensial C++ adalah <strong>${sequentialBaseline.toFixed(1)} ms</strong>. 
+          Kecepatan puncak (Max Speedup) sebesar <strong>${maxSpeedup.toFixed(2)}x</strong> dicapai pada alokasi <strong>${optimalThreads} thread</strong>.
+          <br><br>
+          ${serialExplanation}
+          ${mathStepsHtml}
+          <br>
+          Hal ini mengonfirmasi adanya parallel overhead (manajemen barrier konkurensi OpenMP dan dynamic loop scheduling) yang membatasi speedup linear pada core CPU yang tinggi.
+        `;
+      } else {
+        amdahlAnalysis.innerHTML = `
+          Hasil benchmark menunjukkan waktu eksekusi sekuensial C++ adalah <strong>${sequentialBaseline.toFixed(1)} ms</strong>. 
+          <br><br>
+          Seluruh konfigurasi paralel dilewati karena jumlah thread melebihi kapasitas perangkat keras lokal.
+        `;
+      }
 
       // Restore state
       sim.mode = prevMode;
@@ -1337,6 +1535,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Custom SVG charting renderers
   function renderSVGCharts(seqVal, data) {
+    const xCoords = [60, 110, 160, 210, 260];
+
     // 1. Time Chart
     let svgTime = `<svg width="100%" height="100%" viewBox="0 0 300 150" style="background:#1f293700">`;
     for (let y = 20; y <= 120; y += 25) {
@@ -1352,16 +1552,20 @@ document.addEventListener("DOMContentLoaded", async () => {
       return 120 - (val / maxVal) * 90;
     };
     
-    const xCoords = [60, 110, 160, 210, 260];
     let pathPoints = "";
+    let isFirstPoint = true;
     for (let i = 0; i < data.times.length; i++) {
+      if (data.times[i] <= 0) continue;
       const x = xCoords[i];
       const y = getScaledY(data.times[i]);
-      pathPoints += `${i === 0 ? "M" : "L"} ${x} ${y}`;
+      pathPoints += `${isFirstPoint ? "M" : "L"} ${x} ${y}`;
+      isFirstPoint = false;
       svgTime += `<circle cx="${x}" cy="${y}" r="3" fill="#60a5fa"/>`;
-      svgTime += `<text x="${x}" y="${y - 8}" fill="#60a5fa" font-size="8" text-anchor="middle">${data.times[i].toFixed(0)}ms</text>`;
+      svgTime += `<text x="${x}" y="${y - 8}" fill="#60a5fa" font-size="8" text-anchor="middle">${data.times[i].toFixed(1)}ms</text>`;
     }
-    svgTime += `<path d="${pathPoints}" fill="none" stroke="#3b82f6" stroke-width="2"/>`;
+    if (pathPoints) {
+      svgTime += `<path d="${pathPoints}" fill="none" stroke="#3b82f6" stroke-width="2"/>`;
+    }
     
     // X Axis labels
     for (let i = 0; i < data.threads.length; i++) {
@@ -1381,14 +1585,19 @@ document.addEventListener("DOMContentLoaded", async () => {
     const getSpeedupY = (val) => 120 - (val / 16) * 100;
     
     let pathSpeedup = "";
+    let isFirstSpeedup = true;
     for (let i = 0; i < data.speedup.length; i++) {
+      if (data.times[i] <= 0) continue;
       const x = xCoords[i];
       const y = getSpeedupY(data.speedup[i]);
-      pathSpeedup += `${i === 0 ? "M" : "L"} ${x} ${y}`;
+      pathSpeedup += `${isFirstSpeedup ? "M" : "L"} ${x} ${y}`;
+      isFirstSpeedup = false;
       svgSpeedup += `<circle cx="${x}" cy="${y}" r="3" fill="#fbbf24"/>`;
-      svgSpeedup += `<text x="${x}" y="${y - 8}" fill="#fbbf24" font-size="8" text-anchor="middle">${data.speedup[i].toFixed(1)}x</text>`;
+      svgSpeedup += `<text x="${x}" y="${y - 8}" fill="#fbbf24" font-size="8" text-anchor="middle">${data.speedup[i].toFixed(2)}x</text>`;
     }
-    svgSpeedup += `<path d="${pathSpeedup}" fill="none" stroke="#f59e0b" stroke-width="2"/>`;
+    if (pathSpeedup) {
+      svgSpeedup += `<path d="${pathSpeedup}" fill="none" stroke="#f59e0b" stroke-width="2"/>`;
+    }
     
     for (let i = 0; i < data.threads.length; i++) {
       svgSpeedup += `<text x="${xCoords[i]}" y="138" fill="#9ca3af" font-size="8" text-anchor="middle">${data.threads[i]}T</text>`;
@@ -1407,14 +1616,19 @@ document.addEventListener("DOMContentLoaded", async () => {
     const getEffY = (val) => 120 - val * 100;
     
     let pathEff = "";
+    let isFirstEff = true;
     for (let i = 0; i < data.efficiency.length; i++) {
+      if (data.times[i] <= 0) continue;
       const x = xCoords[i];
       const y = getEffY(data.efficiency[i]);
-      pathEff += `${i === 0 ? "M" : "L"} ${x} ${y}`;
+      pathEff += `${isFirstEff ? "M" : "L"} ${x} ${y}`;
+      isFirstEff = false;
       svgEff += `<circle cx="${x}" cy="${y}" r="3" fill="#34d399"/>`;
       svgEff += `<text x="${x}" y="${y - 8}" fill="#34d399" font-size="8" text-anchor="middle">${(data.efficiency[i]*100).toFixed(0)}%</text>`;
     }
-    svgEff += `<path d="${pathEff}" fill="none" stroke="#10b981" stroke-width="2"/>`;
+    if (pathEff) {
+      svgEff += `<path d="${pathEff}" fill="none" stroke="#10b981" stroke-width="2"/>`;
+    }
     
     for (let i = 0; i < data.threads.length; i++) {
       svgEff += `<text x="${xCoords[i]}" y="138" fill="#9ca3af" font-size="8" text-anchor="middle">${data.threads[i]}T</text>`;

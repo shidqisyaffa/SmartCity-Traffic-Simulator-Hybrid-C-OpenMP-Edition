@@ -792,4 +792,49 @@ graph TD
 
 ---
 
+---
+
+## 12. Peningkatan Fitur & Analisis HPC (Revisi UAS)
+
+Berikut adalah detail konseptual mengenai fitur-fitur baru dan analisis performa High-Performance Computing (HPC) yang diterapkan pada sistem ini:
+
+### 12.1 Logika Reset Simulasi
+Pada logika reset yang diperbarui:
+1. **Pemberhentian & Waktu:** Loop `TICK_REQUEST` segera dihentikan (`state = "stopped"`). `tickCount` dikembalikan ke `0`, sehingga waktu visual di dasbor menampilkan `0.0s`.
+2. **Preservasi Rute & Kendaraan:** Berbeda dengan `clearVehiclesMemory()` yang menghapus seluruh data kendaraan, reset ini mempertahankan jumlah kendaraan (`totalVehicles`) beserta rute aslinya (`vehiclePaths`).
+3. **Restorasi Posisi:** Setiap kendaraan dikembalikan ke posisi asal keberangkatannya (simpul origin). Progress pergerakan di-reset menjadi `0.0f` dan statusnya dikembalikan ke `1` (Moving). Hal ini meminimalkan overhead *re-routing* saat simulasi dijalankan ulang oleh pengguna.
+
+### 12.2 Konsep Desain Peta Manual (Blank Canvas)
+Fitur **Blank Canvas** memicu pembersihan graf total tanpa memuat simpul atau sisi bawaan. Pengguna memulai dengan kanvas kosong 800×600 piksel.
+1. **Resolusi Skala 1:1:** Pada simulator default, terdapat fungsi `fitToCanvas()` untuk menskalakan dan menggeser pusat graf agar pas di layar. Namun, jika jumlah simpul $V < 2$, perhitungan lebar/tinggi graf akan bernilai $0$, memicu bug pembagian dengan nol (*division by zero*).
+2. **Kondisi Batas:** Kami mengatasi ini dengan menerapkan kondisi batas khusus di mana skala di-set tetap `1.0` dan offset di-set `0` apabila jumlah simpul aktif di graf kurang dari 2. Hal ini menjaga proyeksi Canvas tetap 1:1 terhadap koordinat piksel mouse secara alami selama fase inisial pembuatan peta.
+
+### 12.3 Manual Vehicle Spawner
+Pengguna dapat menyuntikkan kendaraan baru secara dinamis lewat perintah IPC `ADD_VEHICLES <Count> <Origin> <Target>`. 
+1. **Dynamic Resizing:** Memori array kendaraan di backend C++ dikonversi dari array statis ke `std::vector` dinamis. Ini memungkinkan pemrosesan *resize* memori secara real-time.
+2. **Pathfinding Dinamis:** Backend menggunakan matriks shortest path Floyd-Warshall yang sudah terhitung di memori cache (`fwNext`) untuk langsung menelusuri rute terpendek dari simpul origin ke target bagi kendaraan baru tersebut secara sekuensial. Jika origin/target bernilai `-1`, backend secara cerdas memilih simpul acak dari daftar simpul aktif (`activeNodes`).
+
+### 12.4 Perhitungan Kinerja HPC & Speedup Riil
+Ketika file statistik diekspor, simulator memicu benchmarking terisolasi pada backend untuk mengukur performa pengolahan algoritma Floyd-Warshall pada struktur graf yang saat itu aktif:
+
+#### A. Waktu Eksekusi Riil ($T$)
+Pengukuran waktu eksekusi sekuensial ($T_1$ atau $T_{seq}$) dan paralel dengan $P$ thread ($T_P$ atau $T_{par}$) dilakukan menggunakan jam beresolusi tinggi standard C++ (`std::chrono::high_resolution_clock`).
+
+#### B. Rumus Speedup ($S$)
+Speedup mengukur seberapa banyak sistem paralel mempercepat waktu eksekusi dibanding sequential baseline:
+$$S = \frac{T_{sekuensial}}{T_{paralel}}$$
+
+#### C. Rumus Efisiensi ($E$)
+Efisiensi mengukur persentase utilitas dari core CPU yang digunakan saat komputasi paralel berlangsung:
+$$E = \frac{S}{P} \times 100\%$$
+*Di mana $P$ adalah alokasi thread yang digunakan.*
+
+#### D. Proteksi Oversubscription (Multi-Device Safety)
+Untuk memastikan simulator berjalan aman pada berbagai device (seperti laptop tim dengan core CPU sedikit):
+1. Sistem mendeteksi jumlah thread hardware maksimal menggunakan fungsi `omp_get_max_threads()`.
+2. Jika skenario benchmark (misalnya 16 thread) melebihi kapasitas thread CPU fisik/logis komputer tersebut, benchmark untuk skenario tersebut **dilewati (skipped)** dan diisi nilai aman `0` (yang dirender sebagai `"N/A"` di CSV) untuk menghindari pembekuan sistem (*freeze/crash*).
+
+---
+
 > **Dokumen ini dibuat sebagai referensi lengkap untuk memahami seluruh fitur, flow, dan mekanisme internal SmartCity Traffic Simulator — Hybrid C++ OpenMP Edition.**
+

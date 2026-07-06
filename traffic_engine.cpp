@@ -30,9 +30,10 @@ int fwNext[MAX_VERTICES * MAX_VERTICES];
 int trafficLights[MAX_VERTICES];
 
 // Vehicles memory
-int vehicleInts[MAX_VEHICLES * 8];
-float vehicleFloats[MAX_VEHICLES * 8];
-int vehiclePaths[MAX_VEHICLES * 100];
+std::vector<int> vehicleInts;
+std::vector<float> vehicleFloats;
+std::vector<int> vehiclePaths;
+
 
 int totalVehicles = 0;
 int tickCount = 0;
@@ -63,9 +64,9 @@ void spawnVehicles(int count, int seed) {
     }
 
     // Reset vehicle memory
-    std::fill(std::begin(vehicleInts), std::end(vehicleInts), 0);
-    std::fill(std::begin(vehicleFloats), std::end(vehicleFloats), 0.0f);
-    std::fill(std::begin(vehiclePaths), std::end(vehiclePaths), 0);
+    vehicleInts.assign(count * 8, 0);
+    vehicleFloats.assign(count * 8, 0.0f);
+    vehiclePaths.assign(count * 100, 0);
     totalVehicles = 0;
 
     if (activeNodeIds.size() < 2) {
@@ -135,7 +136,7 @@ void spawnVehicles(int count, int seed) {
 
 // Sequential Floyd-Warshall baseline
 void runSequentialFW(int V, double& out_exec_time) {
-    double t_start = omp_get_wtime();
+    auto t_start = std::chrono::high_resolution_clock::now();
 
     for (int i = 0; i < V; ++i) {
         for (int j = 0; j < V; ++j) {
@@ -182,21 +183,21 @@ void runSequentialFW(int V, double& out_exec_time) {
         }
     }
 
-    double t_end = omp_get_wtime();
-    out_exec_time = (t_end - t_start) * 1000.0;
+    auto t_end = std::chrono::high_resolution_clock::now();
+    out_exec_time = std::chrono::duration<double, std::milli>(t_end - t_start).count();
 }
 
 // Parallel Floyd-Warshall with dynamic scheduling
 void runParallelFW(int V, int threads, double& out_exec_time, double& out_sync_overhead) {
     omp_set_num_threads(threads);
-    double t_start = omp_get_wtime();
+    auto t_start = std::chrono::high_resolution_clock::now();
 
     std::vector<double> thread_work_time(threads, 0.0);
 
     #pragma omp parallel
     {
         int tid = omp_get_thread_num();
-        double t_work_start = omp_get_wtime();
+        auto t_work_start = std::chrono::high_resolution_clock::now();
 
         #pragma omp for schedule(static)
         for (int i = 0; i < V; ++i) {
@@ -218,15 +219,15 @@ void runParallelFW(int V, int threads, double& out_exec_time, double& out_sync_o
                 }
             }
         }
-        double t_work_end = omp_get_wtime();
-        thread_work_time[tid] += (t_work_end - t_work_start);
+        auto t_work_end = std::chrono::high_resolution_clock::now();
+        thread_work_time[tid] += std::chrono::duration<double, std::milli>(t_work_end - t_work_start).count();
     }
 
     for (int k = 0; k < V; ++k) {
         #pragma omp parallel
         {
             int tid = omp_get_thread_num();
-            double t_work_start = omp_get_wtime();
+            auto t_work_start = std::chrono::high_resolution_clock::now();
 
             #pragma omp for schedule(dynamic)
             for (int i = 0; i < V; ++i) {
@@ -251,17 +252,17 @@ void runParallelFW(int V, int threads, double& out_exec_time, double& out_sync_o
                     }
                 }
             }
-            double t_work_end = omp_get_wtime();
-            thread_work_time[tid] += (t_work_end - t_work_start);
+            auto t_work_end = std::chrono::high_resolution_clock::now();
+            thread_work_time[tid] += std::chrono::duration<double, std::milli>(t_work_end - t_work_start).count();
         }
     }
 
-    double t_end = omp_get_wtime();
-    out_exec_time = (t_end - t_start) * 1000.0;
+    auto t_end = std::chrono::high_resolution_clock::now();
+    out_exec_time = std::chrono::duration<double, std::milli>(t_end - t_start).count();
 
     double total_overhead = 0.0;
     for (int t = 0; t < threads; ++t) {
-        total_overhead += (out_exec_time - (thread_work_time[t] * 1000.0));
+        total_overhead += (out_exec_time - thread_work_time[t]);
     }
     out_sync_overhead = std::max(0.0, total_overhead / threads);
 }
@@ -269,7 +270,7 @@ void runParallelFW(int V, int threads, double& out_exec_time, double& out_sync_o
 // Sequential vehicle simulation step
 void runSequentialVehicles(float tickRate, double& out_exec_time) {
     float dt = tickRate / 1000.0f;
-    double t_start = omp_get_wtime();
+    auto t_start = std::chrono::high_resolution_clock::now();
 
     std::vector<int> candidates(MAX_VERTICES, -1);
 
@@ -382,8 +383,8 @@ void runSequentialVehicles(float tickRate, double& out_exec_time) {
         }
     }
 
-    double t_end = omp_get_wtime();
-    out_exec_time = (t_end - t_start) * 1000.0;
+    auto t_end = std::chrono::high_resolution_clock::now();
+    out_exec_time = std::chrono::duration<double, std::milli>(t_end - t_start).count();
 }
 
 // Parallel vehicle simulation step with lock-free partitioning + reduction
@@ -395,12 +396,12 @@ void runParallelVehicles(int threads, float tickRate, double& out_exec_time, dou
     std::vector<int> thread_candidates(num_threads * MAX_VERTICES, -1);
     std::vector<double> thread_work_time(num_threads, 0.0);
 
-    double t_start = omp_get_wtime();
+    auto t_start = std::chrono::high_resolution_clock::now();
 
     #pragma omp parallel
     {
         int tid = omp_get_thread_num();
-        double t_work_start = omp_get_wtime();
+        auto t_work_start = std::chrono::high_resolution_clock::now();
 
         #pragma omp for schedule(static)
         for (int i = 0; i < totalVehicles; ++i) {
@@ -499,12 +500,12 @@ void runParallelVehicles(int threads, float tickRate, double& out_exec_time, dou
             vehicleFloats[vOffset + 7] = delayCounter;
         }
 
-        double t_work_end = omp_get_wtime();
-        thread_work_time[tid] = (t_work_end - t_work_start);
+        auto t_work_end = std::chrono::high_resolution_clock::now();
+        thread_work_time[tid] = std::chrono::duration<double, std::milli>(t_work_end - t_work_start).count();
     }
 
-    double t_end = omp_get_wtime();
-    out_exec_time = (t_end - t_start) * 1000.0;
+    auto t_end = std::chrono::high_resolution_clock::now();
+    out_exec_time = std::chrono::duration<double, std::milli>(t_end - t_start).count();
 
     // Reduction Phase
     for (int v = 0; v < MAX_VERTICES; ++v) {
@@ -531,7 +532,7 @@ void runParallelVehicles(int threads, float tickRate, double& out_exec_time, dou
 
     double total_overhead = 0.0;
     for (int t = 0; t < num_threads; ++t) {
-        total_overhead += (out_exec_time - (thread_work_time[t] * 1000.0));
+        total_overhead += (out_exec_time - thread_work_time[t]);
     }
     out_sync_overhead = std::max(0.0, total_overhead / num_threads);
 }
@@ -620,6 +621,7 @@ void runBenchmark(std::string& out_json) {
     std::vector<int> threadRuns = {1, 2, 4, 8, 16};
     std::vector<double> par_times;
     std::vector<double> par_overheads;
+
 
     for (int t : threadRuns) {
         double par_sum = 0.0;
@@ -914,6 +916,207 @@ int main() {
             std::string bench_json;
             runBenchmark(bench_json);
             std::cout << bench_json << std::endl;
+        }
+        else if (cmd == "RESET") {
+            tickCount = 0;
+            for (int i = 0; i < totalVehicles; ++i) {
+                int vOffset = i * 8;
+                vehicleInts[vOffset + 2] = 1; // State: Moving
+                vehicleInts[vOffset + 5] = 0; // path index
+                
+                int origin = vehicleInts[vOffset + 3];
+                vehicleFloats[vOffset] = 0.0f; // progress
+                vehicleFloats[vOffset + 2] = 0.0f; // travel time
+                vehicleFloats[vOffset + 3] = coords[origin * 2];
+                vehicleFloats[vOffset + 4] = coords[origin * 2 + 1];
+                vehicleFloats[vOffset + 7] = 0.0f; // delay
+            }
+            std::stringstream response;
+            response << std::fixed << std::setprecision(4);
+            response << "{\"status\":\"success\",\"type\":\"RESET\",\"tickCount\":" << tickCount
+                     << ",\"vehicleInts\":[";
+            for (int i = 0; i < totalVehicles * 8; ++i) {
+                response << vehicleInts[i] << (i == totalVehicles * 8 - 1 ? "" : ",");
+            }
+            response << "],\"vehicleFloats\":[";
+            for (int i = 0; i < totalVehicles * 8; ++i) {
+                response << vehicleFloats[i] << (i == totalVehicles * 8 - 1 ? "" : ",");
+            }
+            response << "]}";
+            std::cout << response.str() << std::endl;
+        }
+        else if (cmd == "ADD_VEHICLES") {
+            int count, originArg, targetArg;
+            ss >> count >> originArg >> targetArg;
+            
+            if (count <= 0) {
+                std::cout << "{\"status\":\"error\",\"message\":\"invalid vehicle count\"}" << std::endl;
+                continue;
+            }
+            if (totalVehicles + count > MAX_VEHICLES) {
+                std::cout << "{\"status\":\"error\",\"message\":\"max vehicles capacity reached\"}" << std::endl;
+                continue;
+            }
+
+            std::vector<int> activeNodeIds;
+            for (int i = 0; i < MAX_VERTICES; ++i) {
+                if (activeNodes[i] == 1) {
+                    activeNodeIds.push_back(i);
+                }
+            }
+
+            if (activeNodeIds.size() < 2) {
+                std::cout << "{\"status\":\"error\",\"message\":\"not enough active nodes to route\"}" << std::endl;
+                continue;
+            }
+
+            std::random_device rd;
+            std::mt19937 gen(rd());
+            std::uniform_int_distribution<> disNode(0, activeNodeIds.size() - 1);
+            std::uniform_real_distribution<float> disReal(0.0f, 1.0f);
+
+            int prevTotal = totalVehicles;
+            int generated = 0;
+            int attempts = 0;
+            int maxAttempts = count * 10;
+
+            vehicleInts.resize((prevTotal + count) * 8, 0);
+            vehicleFloats.resize((prevTotal + count) * 8, 0.0f);
+            vehiclePaths.resize((prevTotal + count) * 100, 0);
+
+            while (generated < count && attempts < maxAttempts) {
+                attempts++;
+                int origin = (originArg == -1) ? activeNodeIds[disNode(gen)] : originArg;
+                int destination = (targetArg == -1) ? activeNodeIds[disNode(gen)] : targetArg;
+                
+                if (origin == destination) continue;
+                if (origin < 0 || origin >= MAX_VERTICES || destination < 0 || destination >= MAX_VERTICES) continue;
+                if (activeNodes[origin] != 1 || activeNodes[destination] != 1) continue;
+
+                std::vector<int> path = reconstructPath(origin, destination);
+                if (path.size() < 2) continue;
+
+                float randType = disReal(gen);
+                int type = 0;
+                float speed = 50.0f;
+                if (randType < 0.6f) {
+                    type = 0;
+                    speed = 50.0f;
+                } else if (randType < 0.9f) {
+                    type = 1;
+                    speed = 70.0f;
+                } else {
+                    type = 2;
+                    speed = 30.0f;
+                }
+
+                float variance = 0.9f + disReal(gen) * 0.2f;
+                speed = speed * variance;
+
+                int currentVehicleIdx = prevTotal + generated;
+                int vOffset = currentVehicleIdx * 8;
+                int vPathOffset = currentVehicleIdx * 100;
+
+                vehicleInts[vOffset] = currentVehicleIdx;
+                vehicleInts[vOffset + 1] = type;
+                vehicleInts[vOffset + 2] = 1; // State: 1 = Moving
+                vehicleInts[vOffset + 3] = origin;
+                vehicleInts[vOffset + 4] = destination;
+                vehicleInts[vOffset + 5] = 0; // path index
+                vehicleInts[vOffset + 6] = path.size();
+
+                vehicleFloats[vOffset] = 0.0f; // progress
+                vehicleFloats[vOffset + 1] = speed;
+                vehicleFloats[vOffset + 2] = 0.0f; // travel time
+                vehicleFloats[vOffset + 3] = coords[origin * 2];
+                vehicleFloats[vOffset + 4] = coords[origin * 2 + 1];
+                vehicleFloats[vOffset + 7] = 0.0f; // delay
+
+                for (size_t p = 0; p < path.size(); ++p) {
+                    vehiclePaths[vPathOffset + p] = path[p];
+                }
+
+                generated++;
+            }
+
+            totalVehicles = prevTotal + generated;
+            vehicleInts.resize(totalVehicles * 8);
+            vehicleFloats.resize(totalVehicles * 8);
+            vehiclePaths.resize(totalVehicles * 100);
+
+            std::stringstream response;
+            response << std::fixed << std::setprecision(4);
+            response << "{\"status\":\"success\",\"type\":\"ADD_VEHICLES\",\"totalVehicles\":" << totalVehicles;
+            response << ",\"vehicleInts\":[";
+            for (int i = 0; i < totalVehicles * 8; ++i) {
+                response << vehicleInts[i] << (i == totalVehicles * 8 - 1 ? "" : ",");
+            }
+            response << "],\"vehicleFloats\":[";
+            for (int i = 0; i < totalVehicles * 8; ++i) {
+                response << vehicleFloats[i] << (i == totalVehicles * 8 - 1 ? "" : ",");
+            }
+            response << "],\"vehiclePaths\":[";
+            for (int i = 0; i < totalVehicles * 100; ++i) {
+                response << vehiclePaths[i] << (i == totalVehicles * 100 - 1 ? "" : ",");
+            }
+            response << "]}";
+
+            std::cout << response.str() << std::endl;
+        }
+        else if (cmd == "BENCHMARK_CURRENT") {
+            int V;
+            ss >> V;
+            if (V <= 0 || V > MAX_VERTICES) {
+                std::cout << "{\"status\":\"error\",\"message\":\"invalid boundary\"}" << std::endl;
+                continue;
+            }
+
+            int runsCount = 5;
+            if (V < 100) runsCount = 100;
+            else if (V < 300) runsCount = 20;
+
+            double seq_sum = 0.0;
+            for (int run = 0; run < runsCount; ++run) {
+                double run_time = 0.0;
+                runSequentialFW(V, run_time);
+                seq_sum += run_time;
+            }
+            double seq_time = seq_sum / runsCount;
+
+            std::vector<int> threadRuns = {1, 2, 4, 8, 16};
+            std::vector<double> par_times;
+            std::vector<double> par_overheads;
+
+
+            for (int t : threadRuns) {
+                double par_sum = 0.0;
+                double overhead_sum = 0.0;
+                for (int run = 0; run < runsCount; ++run) {
+                    double run_time = 0.0;
+                    double overhead = 0.0;
+                    runParallelFW(V, t, run_time, overhead);
+                    par_sum += run_time;
+                    overhead_sum += overhead;
+                }
+                par_times.push_back(par_sum / runsCount);
+                par_overheads.push_back(overhead_sum / runsCount);
+            }
+
+            rerouteActiveVehicles();
+
+            std::stringstream response;
+            response << std::fixed << std::setprecision(4);
+            response << "{\"status\":\"success\",\"type\":\"BENCHMARK_CURRENT\",\"seq_time\":" << seq_time << ",\"threads\":[1,2,4,8,16],\"times\":[";
+            for (size_t i = 0; i < par_times.size(); ++i) {
+                response << par_times[i] << (i == par_times.size() - 1 ? "" : ",");
+            }
+            response << "],\"overheads\":[";
+            for (size_t i = 0; i < par_overheads.size(); ++i) {
+                response << par_overheads[i] << (i == par_overheads.size() - 1 ? "" : ",");
+            }
+            response << "]}";
+
+            std::cout << response.str() << std::endl;
         }
         else {
             std::cout << "{\"status\":\"error\",\"message\":\"unknown command\"}" << std::endl;

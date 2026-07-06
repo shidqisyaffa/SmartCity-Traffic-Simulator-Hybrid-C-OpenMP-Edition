@@ -95,7 +95,12 @@ export class CanvasRenderer {
    */
   fitToCanvas() {
     const V = this.sim.getGraphBoundary();
-    if (V === 0) return;
+    if (V === 0) {
+      this.scale = 1.0;
+      this.offsetX = 0;
+      this.offsetY = 0;
+      return;
+    }
 
     let minX = Infinity, maxX = -Infinity;
     let minY = Infinity, maxY = -Infinity;
@@ -113,7 +118,12 @@ export class CanvasRenderer {
       }
     }
 
-    if (count === 0) return;
+    if (count < 2) {
+      this.scale = 1.0;
+      this.offsetX = 0;
+      this.offsetY = 0;
+      return;
+    }
 
     const graphWidth = maxX - minX || 1;
     const graphHeight = maxY - minY || 1;

@@ -105,3 +105,34 @@ Berikut adalah pemetaan fungsi dari setiap komponen berkas pada proyek hibrida S
 * **[.vscode/c_cpp_properties.json](.vscode/c_cpp_properties.json):** Konfigurasi IntelliSense C++ dasar untuk merujuk pada instalasi MSYS2 UCRT64 G++ lokal.
 * **[.vscode/settings.json](.vscode/settings.json):** Konfigurasi khusus ekstensi clangd untuk mendeteksi compiler driver sehingga pustaka bawaan kompiler MSYS2 dapat dimuat secara mulus tanpa error diagnostic palsu.
 * **[compile_flags.txt](compile_flags.txt):** Berkas parameter kompilasi sisi parser agar editor memahami standar bahasa C++20 dan fitur OpenMP yang digunakan dalam kode.
+
+---
+
+## 🆕 Fitur & Fungsionalitas Baru (Revisi UAS)
+
+Berikut adalah beberapa fitur baru yang ditambahkan untuk memenuhi kebutuhan analisis performa HPC dan fleksibilitas simulator:
+
+### 1. Perbaikan Logika Reset (Reset Logic)
+Ketika tombol **Reset** ditekan:
+- Waktu simulasi dihentikan total dan kembali ke **0.0s**.
+- Status simulator kembali ke **STOPPED**.
+- **Data kendaraan dan rute awal tetap dipertahankan**. Kendaraan akan dikembalikan ke posisi koordinat awal/keberangkatan (origin node) dengan progress 0%, travel time 0s, dan state di-reset menjadi Moving. Metrik Live Dashboard (Active, Finished, Throughput, Tick) dikosongkan.
+
+### 2. Desain Peta Manual (Blank Canvas)
+Pengguna dapat memilih preset **Blank Canvas (Manual Map Design)** dari dropdown preset graf. Kanvas akan dikosongkan sepenuhnya (0 Node, 0 Edge).
+- Pengguna dapat beralih ke **Graph Edit Mode** di bagian bawah dasbor untuk menambahkan node dengan mengklik area kosong pada Canvas (**Add Node**).
+- Hubungkan simpul-simpul jalan secara dinamis menggunakan **Add Road** dengan menentukan bobot dan tipe arah (dua arah / satu arah).
+- Proyeksi koordinat Canvas secara otomatis menyesuaikan dengan skala 1:1 terhadap koordinat piksel selama jumlah node di kanvas kurang dari 2 untuk mencegah bug pembagian dengan nol (*division by zero*).
+
+### 3. Spawn Kendaraan Manual (Manual Vehicle Spawner)
+Di bawah menu "Vehicle Spawn Setup", terdapat kontrol manual baru:
+- **Input Angka:** Tentukan berapa banyak kendaraan yang ingin disuntikkan secara dinamis.
+- **Tombol "Spawn Kendaraan":** Mengirim perintah `ADD_VEHICLES` ke backend C++ secara langsung saat simulasi sedang berhenti maupun berjalan. Rute perjalanan otomatis dihitung menggunakan matriks next-hop Floyd-Warshall yang sudah ada.
+
+### 4. Ekspor Analisis Performa Komputasi (HPC Analysis CSV)
+Modifikasi tombol **Export Journey CSV** memicu benchmarking real-time pada peta aktif saat ini untuk thread 1, 2, 4, 8, dan 16.
+- Hasil benchmarking tersebut dianalisis dengan rumus HPC standar dan diletakkan di bagian atas file CSV:
+  - **Speedup (S):** $S = \frac{T_{sekuensial}}{T_{paralel}}$
+  - **Efisiensi (E):** $E = \frac{S}{P} \times 100\%$ (di mana $P$ adalah alokasi thread).
+- **Proteksi Multi-Device:** Pengujian thread yang melebihi kapasitas hardware logis CPU lokal (menggunakan fungsi `omp_get_max_threads()`) secara otomatis akan dilewati dan ditandai `"N/A"` untuk mencegah kegagalan eksekusi (*oversubscription* / crash / freeze) di device lain yang memiliki core CPU lebih sedikit.
+

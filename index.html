@@ -80,6 +80,7 @@
               <option value="custom_250">Stress Test Medium (250 Nodes)</option>
               <option value="custom_500">Stress Test Large (500 Nodes)</option>
               <option value="custom_1000">Stress Test Extreme (1000 Nodes)</option>
+              <option value="blank">Blank Canvas (Manual Map Design)</option>
             </select>
           </div>
           <button id="btn-load-graph" class="btn btn-secondary">Generate City Graph</button>
@@ -99,6 +100,29 @@
             </select>
           </div>
           <button id="btn-spawn-vehicles" class="btn btn-secondary">Spawn & Routify Vehicles</button>
+          
+          <div class="form-group" style="margin-top: 15px; border-top: 1px solid var(--border-glass); padding-top: 12px;">
+            <label for="manual-veh-count">Manual Vehicle Spawner</label>
+            <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+              <div style="flex: 1;">
+                <label style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 4px; display: block;">Count</label>
+                <input type="number" id="manual-veh-count" min="1" max="1000" value="10" class="form-control" style="background: rgba(17, 24, 39, 0.5); border: 1px solid var(--border-glass); color: var(--text-primary); padding: 6px 12px; border-radius: 6px; width: 100%;">
+              </div>
+              <div style="flex: 1;">
+                <label style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 4px; display: block;">Start Node</label>
+                <select id="manual-veh-origin" style="background: rgba(17, 24, 39, 0.5); border: 1px solid var(--border-glass); color: var(--text-primary); padding: 6px 12px; border-radius: 6px; width: 100%;">
+                  <option value="-1">Random</option>
+                </select>
+              </div>
+              <div style="flex: 1;">
+                <label style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 4px; display: block;">Dest Node</label>
+                <select id="manual-veh-target" style="background: rgba(17, 24, 39, 0.5); border: 1px solid var(--border-glass); color: var(--text-primary); padding: 6px 12px; border-radius: 6px; width: 100%;">
+                  <option value="-1">Random</option>
+                </select>
+              </div>
+            </div>
+            <button id="btn-add-vehicle-manual" class="btn btn-secondary btn-sm" style="width: 100%;">Spawn Kendaraan</button>
+          </div>
         </section>
 
         <!-- Actions -->
