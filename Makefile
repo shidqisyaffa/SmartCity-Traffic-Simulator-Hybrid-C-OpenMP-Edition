@@ -2,7 +2,7 @@
 # Run with: mingw32-make
 
 CXX = g++
-CXXFLAGS = -O3 -fopenmp -std=c++20 -Wall
+CXXFLAGS = -O3 -fopenmp -std=c++20 -Wall -static -static-libgcc -static-libstdc++
 
 TARGET = traffic_engine.exe
 SRC = traffic_engine.cpp
