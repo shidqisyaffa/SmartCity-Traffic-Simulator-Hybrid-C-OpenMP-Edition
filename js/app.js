@@ -1136,17 +1136,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
-    notify("Running performance benchmark on current map layout...");
-    btnExportCsv.disabled = true;
-    
-    let benchmarkData = null;
-    try {
-      benchmarkData = await sim.runCurrentGraphBenchmark();
-    } catch (err) {
-      console.error("Failed to run benchmark on current graph:", err);
-    }
-    
-    btnExportCsv.disabled = false;
+    notify("Compiling performance stats from current session...");
+    const benchmarkData = sim.getSessionAverages();
     notify("Generating CSV report...");
 
     let csvContent = "\ufeff"; // BOM for Excel UTF-8 compatibility
@@ -1154,25 +1145,38 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Section 1: Computational Performance Analysis
     csvContent += "--- COMPUTATIONAL PERFORMANCE ANALYSIS (FLOYD-WARSHALL) ---\n";
     csvContent += "Graph size (V intersections)," + sim.getGraphBoundary() + "\n";
-    if (benchmarkData && benchmarkData.status === "success") {
-      csvContent += "Sequential Execution Time (ms)," + benchmarkData.seq_time.toFixed(4) + "\n\n";
-      csvContent += "Thread Count (P),Execution Time (T_P) (ms),Speedup (S),Efficiency (E) (%),Sync Overhead (ms)\n";
-      
-      let maxSpeedup = -1;
-      let optimalThread = 1;
-      
-      for (let i = 0; i < benchmarkData.threads.length; i++) {
-        const p = benchmarkData.threads[i];
-        const t_p = benchmarkData.times[i];
-        const overhead = benchmarkData.overheads[i];
-        
-        let t_p_str = t_p.toFixed(4);
-        let s_str = "N/A";
-        let e_str = "N/A";
-        let overhead_str = overhead.toFixed(4);
+    
+    let seqTime = benchmarkData.seq_time;
+    if (seqTime === 0 && benchmarkData.times[0] > 0) {
+      seqTime = benchmarkData.times[0]; // Fallback to 1T parallel time
+    }
 
-        if (t_p > 0) {
-          const s = benchmarkData.seq_time / t_p;
+    if (seqTime > 0) {
+      csvContent += "Sequential Execution Time (ms)," + seqTime.toFixed(4) + (benchmarkData.seq_time === 0 ? " (Estimated from 1T)" : "") + "\n\n";
+    } else {
+      csvContent += "Sequential Execution Time (ms),N/A (No Sequential Run in Session)\n\n";
+    }
+
+    csvContent += "Thread Count (P),Execution Time (T_P) (ms),Speedup (S),Efficiency (E) (%),Sync Overhead (ms)\n";
+    
+    let maxSpeedup = -1;
+    let optimalThread = 1;
+    
+    for (let i = 0; i < benchmarkData.threads.length; i++) {
+      const p = benchmarkData.threads[i];
+      const t_p = benchmarkData.times[i];
+      const overhead = benchmarkData.overheads[i];
+      
+      let t_p_str = "N/A";
+      let s_str = "N/A";
+      let e_str = "N/A";
+      let overhead_str = "N/A";
+
+      if (t_p > 0) {
+        t_p_str = t_p.toFixed(4);
+        overhead_str = overhead.toFixed(4);
+        if (seqTime > 0) {
+          const s = seqTime / t_p;
           const e = (s / p) * 100;
           s_str = s.toFixed(4);
           e_str = e.toFixed(2) + "%";
@@ -1181,13 +1185,13 @@ document.addEventListener("DOMContentLoaded", async () => {
             maxSpeedup = s;
             optimalThread = p;
           }
-        } else {
-          t_p_str = "N/A (Oversubscribed / Skipped)";
-          overhead_str = "N/A";
         }
-        
-        csvContent += `${p},${t_p_str},${s_str},${e_str},${overhead_str}\n`;
+      } else {
+        t_p_str = "N/A (Not Run in Session)";
       }
+      
+      csvContent += `${p},${t_p_str},${s_str},${e_str},${overhead_str}\n`;
+    }
       
       if (maxSpeedup > 0) {
         csvContent += `\nOptimal Thread Count,${optimalThread} (Speedup: ${maxSpeedup.toFixed(2)}x)\n\n`;

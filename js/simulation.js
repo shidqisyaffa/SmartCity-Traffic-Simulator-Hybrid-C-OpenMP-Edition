@@ -28,6 +28,16 @@ export class Simulation {
       totalFinished: 0
     };
 
+    // Live session profiling logs
+    this.sessionMetrics = {
+      fwTimes: { 1: [], 2: [], 4: [], 8: [], 16: [] },
+      fwOverheads: { 1: [], 2: [], 4: [], 8: [], 16: [] },
+      updateTimes: { 1: [], 2: [], 4: [], 8: [], 16: [] },
+      updateOverheads: { 1: [], 2: [], 4: [], 8: [], 16: [] },
+      seqFwTimes: [],
+      seqUpdateTimes: []
+    };
+
     // Pre-allocated SharedArrayBuffers (Thread-safe memory layout)
     this.buffers = {
       weights: new SharedArrayBuffer(MAX_VERTICES * MAX_VERTICES * 4), // Float32
@@ -210,6 +220,56 @@ export class Simulation {
     this.activeVehicles = 0;
     this.metrics.totalFinished = 0;
     this.metrics.throughput = 0;
+    this.resetSessionMetrics();
+  }
+
+  /**
+   * Reset the session metrics logs.
+   */
+  resetSessionMetrics() {
+    this.sessionMetrics = {
+      fwTimes: { 1: [], 2: [], 4: [], 8: [], 16: [] },
+      fwOverheads: { 1: [], 2: [], 4: [], 8: [], 16: [] },
+      updateTimes: { 1: [], 2: [], 4: [], 8: [], 16: [] },
+      updateOverheads: { 1: [], 2: [], 4: [], 8: [], 16: [] },
+      seqFwTimes: [],
+      seqUpdateTimes: []
+    };
+  }
+
+  /**
+   * Compiles the averages of all measured session execution times per thread allocation.
+   */
+  getSessionAverages() {
+    const avg = (arr) => arr.length > 0 ? arr.reduce((a,b)=>a+b, 0) / arr.length : 0;
+    
+    const seqFw = avg(this.sessionMetrics.seqFwTimes);
+    const seqUpdate = avg(this.sessionMetrics.seqUpdateTimes);
+    
+    const result = {
+      status: "success",
+      seq_time: seqFw + seqUpdate, // Total sequential time
+      seq_fw: seqFw,
+      seq_update: seqUpdate,
+      threads: [1, 2, 4, 8, 16],
+      times: [],
+      overheads: []
+    };
+    
+    for (const t of result.threads) {
+      const fwAvg = avg(this.sessionMetrics.fwTimes[t]);
+      const updateAvg = avg(this.sessionMetrics.updateTimes[t]);
+      const totalAvg = fwAvg + updateAvg;
+      
+      const fwOverhead = avg(this.sessionMetrics.fwOverheads[t]);
+      const updateOverhead = avg(this.sessionMetrics.updateOverheads[t]);
+      const totalOverhead = fwOverhead + updateOverhead;
+      
+      result.times.push(totalAvg);
+      result.overheads.push(totalOverhead);
+    }
+    
+    return result;
   }
 
   /**
@@ -282,11 +342,19 @@ export class Simulation {
       this.metrics.fwSequentialTime = response.exec_time;
       this.metrics.fwParallelTime = 0;
       this.metrics.fwSyncOverhead = 0;
+      
+      this.sessionMetrics.seqFwTimes.push(response.exec_time);
       return this.metrics.fwSequentialTime;
     } else {
       this.metrics.fwParallelTime = response.exec_time;
       this.metrics.fwSequentialTime = 0;
       this.metrics.fwSyncOverhead = response.sync_overhead;
+      
+      const t = this.numThreads;
+      if (this.sessionMetrics.fwTimes[t]) {
+        this.sessionMetrics.fwTimes[t].push(response.exec_time);
+        this.sessionMetrics.fwOverheads[t].push(response.sync_overhead);
+      }
       return this.metrics.fwParallelTime;
     }
   }
@@ -375,10 +443,18 @@ export class Simulation {
       this.metrics.updateSequentialTime = response.exec_time;
       this.metrics.updateParallelTime = 0;
       this.metrics.updateSyncOverhead = 0;
+      
+      this.sessionMetrics.seqUpdateTimes.push(response.exec_time);
     } else {
       this.metrics.updateParallelTime = response.exec_time;
       this.metrics.updateSequentialTime = 0;
       this.metrics.updateSyncOverhead = response.sync_overhead;
+      
+      const t = this.numThreads;
+      if (this.sessionMetrics.updateTimes[t]) {
+        this.sessionMetrics.updateTimes[t].push(response.exec_time);
+        this.sessionMetrics.updateOverheads[t].push(response.sync_overhead);
+      }
     }
 
     // 4. Update worker thread monitor states (C++ thread states mapped to syncView)
