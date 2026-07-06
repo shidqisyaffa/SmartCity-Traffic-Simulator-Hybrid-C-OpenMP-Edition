@@ -1461,7 +1461,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (maxSpeedup > 0) {
         let serialExplanation = "";
         if (f >= 1.0) {
-          serialExplanation = `Berdasarkan <strong>Hukum Amdahl</strong>, estimasi fraksi serial sistem ini adalah <strong>100.0%</strong>. Hal ini dikarenakan ukuran beban kerja graf saat ini terlalu kecil (V=${sim.getGraphBoundary()} nodes) sehingga overhead inisialisasi thread paralel OpenMP mendominasi seluruh waktu komputasi, menyebabkan perlambatan dibanding baseline sekuensial.`;
+          serialExplanation = `Berdasarkan <strong>Hukum Amdahl</strong>, estimasi fraksi serial sistem ini adalah <strong>100.0%</strong>. Hal ini dikarenakan ukuran beban kerja graf benchmark ini terlalu kecil (V=250 nodes) sehingga overhead inisialisasi thread paralel OpenMP mendominasi seluruh waktu komputasi, menyebabkan perlambatan dibanding baseline sekuensial.`;
         } else {
           serialExplanation = `Berdasarkan <strong>Hukum Amdahl</strong>, estimasi fraksi serial sistem ini adalah <strong>${(f * 100).toFixed(1)}%</strong>. Rata-rata waktu sinkronisasi overhead (Synchronization Overhead Time) pada thread puncak adalah <strong>${peakOverhead.toFixed(2)} ms</strong>.`;
         }
