@@ -163,6 +163,42 @@ export class CanvasRenderer {
 
     if (V === 0) return;
 
+    // Pre-calculate all incoming and queued incoming nodes per intersection for Traffic-Adaptive Queueing
+    const allIncomingPerNode = Array.from({ length: V }, () => []);
+    const queuedIncomingPerNode = Array.from({ length: V }, () => []);
+
+    for (let j = 0; j < V; j++) {
+      if (this.sim.graph.activeNodes[j] === 1) {
+        for (let tempU = 0; tempU < V; tempU++) {
+          if (this.sim.graph.activeNodes[tempU] === 1 && tempU !== j) {
+            const w_in = this.sim.graph.weights[tempU * MAX_VERTICES + j];
+            const isBlocked_in = this.sim.graph.blocked[tempU * MAX_VERTICES + j] === 1;
+            if (w_in !== Infinity && !isBlocked_in) {
+              allIncomingPerNode[j].push(tempU);
+            }
+          }
+        }
+      }
+    }
+
+    for (let i = 0; i < this.sim.totalVehicles; i++) {
+      const state = this.sim.vehicleIntsView[i * 8 + 2];
+      if (state === 1 || state === 2 || state === 3) {
+        const currentPathIdx = this.sim.vehicleIntsView[i * 8 + 5];
+        const vPathOffset = i * 100;
+        const u = this.sim.vehiclePathsView[vPathOffset + currentPathIdx];
+        const v = this.sim.vehiclePathsView[vPathOffset + currentPathIdx + 1];
+        const progress = this.sim.vehicleFloatsView[i * 8];
+        
+        if (progress >= 1.0 && v !== undefined && v < V) {
+          const q = queuedIncomingPerNode[v];
+          if (q && !q.includes(u)) {
+            q.push(u);
+          }
+        }
+      }
+    }
+
     // Calculate initial scale/offset if first run
     if (this.scale === 1.0 && this.offsetX === 0) {
       this.fitToCanvas();
@@ -291,6 +327,82 @@ export class CanvasRenderer {
           this.ctx.textBaseline = "middle";
           this.ctx.fillText(w.toFixed(0), midX, midY);
         }
+
+        // E. Draw Traffic Light Stop Line Indicator at inner edge end (elegant, no "kutil")
+        if (!isBlocked && !isLODActive) {
+          const dx = vCoords.x - uCoords.x;
+          const dy = vCoords.y - uCoords.y;
+          const len = Math.hypot(dx, dy);
+          if (len > 0) {
+            const ux_dir = dx / len; // unit vector along edge direction
+            const uy_dir = dy / len;
+
+            // Perpendicular unit vector (rotated 90°) for stop-line width
+            const px = -uy_dir;
+            const py =  ux_dir;
+
+            const nodeRadius = this.presentationMode ? 14 : 11;
+            // Place stop-line just inside the edge end, before touching node boundary
+            const stopDist = nodeRadius + (this.presentationMode ? 9 : 7);
+            // Center point of the stop-line indicator (on the lane-shifted road)
+            const slx = vCoords.x - ux_dir * stopDist + shiftX;
+            const sly = vCoords.y - uy_dir * stopDist + shiftY;
+
+            const queued = queuedIncomingPerNode[j] || [];
+            const allIncoming = allIncomingPerNode[j] || [];
+            const targets = queued.length > 0 ? queued : allIncoming;
+
+            let isLightRed = false;
+            if (targets.length > 1) {
+              const green_idx = Math.floor(this.sim.tickCount / 30) % targets.length;
+              if (targets[green_idx] !== i) {
+                isLightRed = true;
+              }
+            } else if (targets.length === 1) {
+              if (targets[0] !== i) {
+                isLightRed = true;
+              }
+            }
+
+            // Color palette with soft glow
+            const lightColor = isLightRed ? "#EF4444" : "#10B981";
+            const glowColor  = isLightRed ? "rgba(239,68,68,0.55)" : "rgba(16,185,129,0.55)";
+            const halfLen = this.presentationMode ? 4.5 : 3.5; // half-width of stop bar
+
+            this.ctx.save();
+
+            // 1. Outer glow halo (translucent wider bar for depth)
+            this.ctx.beginPath();
+            this.ctx.moveTo(slx - px * (halfLen + 1.5), sly - py * (halfLen + 1.5));
+            this.ctx.lineTo(slx + px * (halfLen + 1.5), sly + py * (halfLen + 1.5));
+            this.ctx.strokeStyle = glowColor;
+            this.ctx.lineWidth = this.presentationMode ? 5 : 3.5;
+            this.ctx.lineCap = "round";
+            this.ctx.shadowColor = glowColor;
+            this.ctx.shadowBlur = 6;
+            this.ctx.stroke();
+
+            // 2. Crisp stop-line bar (solid, on top of glow)
+            this.ctx.beginPath();
+            this.ctx.moveTo(slx - px * halfLen, sly - py * halfLen);
+            this.ctx.lineTo(slx + px * halfLen, sly + py * halfLen);
+            this.ctx.strokeStyle = lightColor;
+            this.ctx.lineWidth = this.presentationMode ? 2.5 : 1.8;
+            this.ctx.lineCap = "round";
+            this.ctx.shadowColor = lightColor;
+            this.ctx.shadowBlur = 4;
+            this.ctx.stroke();
+
+            // 3. Tiny indicator dot on the stop-line center (micro signal head)
+            this.ctx.beginPath();
+            this.ctx.arc(slx, sly, this.presentationMode ? 2.2 : 1.6, 0, Math.PI * 2);
+            this.ctx.fillStyle = lightColor;
+            this.ctx.shadowBlur = 5;
+            this.ctx.fill();
+
+            this.ctx.restore();
+          }
+        }
       }
     }
 
@@ -326,8 +438,20 @@ export class CanvasRenderer {
       this.ctx.beginPath();
       this.ctx.arc(coords.x, coords.y, nodeRadius, 0, Math.PI * 2);
       this.ctx.fillStyle = this.theme.node;
-      const isRed = this.sim.trafficLights && this.sim.trafficLights[i] === 1;
-      this.ctx.strokeStyle = isRed ? "#EF4444" : "#10B981";
+      
+      // Node stroke is Red if any vehicle is waiting at this node, Green otherwise
+      let hasWaiting = false;
+      for (let v = 0; v < this.sim.totalVehicles; v++) {
+        if (this.sim.vehicleIntsView[v * 8 + 2] === 2) { // 2 = Waiting
+          const currentPathIdx = this.sim.vehicleIntsView[v * 8 + 5];
+          const next_v = this.sim.vehiclePathsView[v * 100 + currentPathIdx + 1];
+          if (next_v === i) {
+            hasWaiting = true;
+            break;
+          }
+        }
+      }
+      this.ctx.strokeStyle = hasWaiting ? "#EF4444" : "#10B981";
       this.ctx.lineWidth = this.presentationMode ? 3.5 : 2;
       this.ctx.fill();
       this.ctx.stroke();
@@ -600,45 +724,7 @@ export class CanvasRenderer {
     // Increase size of boxes in Presentation Mode
     const boxScale = this.presentationMode ? 1.15 : 1.0;
 
-    // C. Draw Selected Vehicle Info HUD Overlay
-    if (this.selectedVehicleId !== null && this.selectedVehicleId < this.sim.totalVehicles) {
-      const vOffset = this.selectedVehicleId * 8;
-      const state = this.sim.vehicleIntsView[vOffset + 2];
-      
-      if (state === 1 || state === 2 || state === 3) {
-        const id = this.sim.vehicleIntsView[vOffset];
-        const type = this.sim.vehicleIntsView[vOffset + 1];
-        const speed = this.sim.vehicleFloatsView[vOffset + 1];
-        const travelTime = this.sim.vehicleFloatsView[vOffset + 2];
-        const progress = this.sim.vehicleFloatsView[vOffset] * 100;
-        
-        const typeStr = type === 0 ? "Mobil" : type === 1 ? "Motor" : "Bus";
-        const stateStr = state === 1 ? "Moving" : state === 2 ? "Waiting" : "Stuck";
-
-        const hudW = 160 * boxScale;
-        const hudH = 80 * boxScale;
-        const hudX = 15;
-        const hudY = this.canvas.height - hudH - 95; // above zoom buttons
-
-        this.ctx.fillStyle = this.theme.hudBg;
-        this.ctx.strokeStyle = this.theme.selectedPath;
-        this.ctx.lineWidth = 1.5;
-        this.drawRoundedRect(hudX, hudY, hudW, hudH, 10);
-        this.ctx.stroke();
-
-        this.ctx.fillStyle = this.theme.nodeText;
-        this.ctx.font = `bold ${this.presentationMode ? 11 : 9.5}px 'Inter', sans-serif`;
-        this.ctx.fillText(`🔍 Selected Vehicle #${id}`, hudX + 10, hudY + 16 * boxScale);
-
-        this.ctx.font = `${this.presentationMode ? 10 : 8.5}px monospace`;
-        this.ctx.fillStyle = varColor(this.theme.nodeText, 0.8);
-        this.ctx.fillText(`Type  : ${typeStr} (${stateStr})`, hudX + 10, hudY + 32 * boxScale);
-        this.ctx.fillText(`Speed : ${speed.toFixed(1)} px/s`, hudX + 10, hudY + 44 * boxScale);
-        this.ctx.fillText(`Time  : ${travelTime.toFixed(1)} s`, hudX + 10, hudY + 56 * boxScale);
-        this.ctx.fillText(`Prog  : ${progress.toFixed(0)}%`, hudX + 10, hudY + 68 * boxScale);
-      }
-    }
-
+    // C. Vehicle info HUD drawn via HTML details overlay (handled in app.js/styles.css)
     this.ctx.restore();
   }
 }

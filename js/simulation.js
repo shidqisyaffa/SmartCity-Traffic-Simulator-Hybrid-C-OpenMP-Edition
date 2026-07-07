@@ -15,6 +15,9 @@ export class Simulation {
     this.tickCount = 0;
     this.tickRate = 50;       // millisecond tick rate (default 20 FPS / 50ms)
     this.numThreads = 4;
+    this.maxHardwareThreads = 4; // default fallback
+    this.threadCores = [];
+    this.threadStates = [];
     
     // Performance metrics
     this.metrics = {
@@ -98,8 +101,18 @@ export class Simulation {
       console.log(`[WebSocket] Connecting to ${wsUrl}...`);
       this.socket = new WebSocket(wsUrl);
 
-      this.socket.onopen = () => {
+      this.socket.onopen = async () => {
         console.log("[WebSocket] Connected to C++ backend pipeline server successfully.");
+        try {
+          const info = await this.sendRequest("GET_HARDWARE_INFO", "HARDWARE_INFO");
+          this.maxHardwareThreads = info.maxThreads || 4;
+          console.log(`[Simulation] Detected hardware thread limit: ${this.maxHardwareThreads}`);
+          if (this.onHardwareDetect) {
+            this.onHardwareDetect(this.maxHardwareThreads);
+          }
+        } catch (err) {
+          console.warn("Failed to retrieve hardware info:", err);
+        }
         resolve();
       };
 
@@ -221,6 +234,7 @@ export class Simulation {
     this.metrics.totalFinished = 0;
     this.metrics.throughput = 0;
     this.resetSessionMetrics();
+    this.vehicleThreadTimes = null;
   }
 
   /**
@@ -332,9 +346,11 @@ export class Simulation {
 
         const val = fwDist[srcIdx];
         this.fwDistanceView[dstIdx] = val === null ? Infinity : val;
-        this.fwNextView[dstIdx] = fwNxt[srcIdx];
       }
     }
+    // Capture thread details from backend
+    this.threadCores = response.threadCores || [];
+    this.threadStates = response.threadStates || [];
 
     const tEnd = performance.now();
 
@@ -391,6 +407,9 @@ export class Simulation {
     for (let i = 0; i < paths.length; i++) {
       this.vehiclePathsView[i] = paths[i];
     }
+    if (response.vehicleThreadTimes) {
+      this.vehicleThreadTimes = response.vehicleThreadTimes;
+    }
 
     console.log(`Simulation: Spawned ${this.totalVehicles} vehicles successfully via C++.`);
   }
@@ -425,6 +444,13 @@ export class Simulation {
     for (let i = 0; i < floats.length; i++) {
       this.vehicleFloatsView[i] = floats[i];
     }
+    if (response.vehicleThreadTimes) {
+      this.vehicleThreadTimes = response.vehicleThreadTimes;
+    }
+
+    // Capture thread details from backend
+    this.threadCores = response.threadCores || [];
+    this.threadStates = response.threadStates || [];
 
     // 3. Compile metrics and statistics
     let active = response.metrics.active;
@@ -557,6 +583,9 @@ export class Simulation {
         for (let i = 0; i < floats.length; i++) {
           this.vehicleFloatsView[i] = floats[i];
         }
+        if (response.vehicleThreadTimes) {
+          this.vehicleThreadTimes = response.vehicleThreadTimes;
+        }
       }
     } catch (err) {
       console.error("Failed to reset backend simulation:", err);
@@ -590,6 +619,36 @@ export class Simulation {
       }
       for (let i = 0; i < paths.length; i++) {
         this.vehiclePathsView[i] = paths[i];
+      }
+      if (response.vehicleThreadTimes) {
+        this.vehicleThreadTimes = response.vehicleThreadTimes;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Updates vehicle properties (origin/destination) dynamically.
+   */
+  async updateVehicle(id, origin, destination) {
+    const response = await this.sendRequest(`UPDATE_VEHICLE ${id} ${origin} ${destination}`, "UPDATE_VEHICLE");
+    if (response && response.status === "success") {
+      const ints = response.vehicleInts || [];
+      const floats = response.vehicleFloats || [];
+      const paths = response.vehiclePaths || [];
+      
+      for (let i = 0; i < ints.length; i++) {
+        this.vehicleIntsView[i] = ints[i];
+      }
+      for (let i = 0; i < floats.length; i++) {
+        this.vehicleFloatsView[i] = floats[i];
+      }
+      for (let i = 0; i < paths.length; i++) {
+        this.vehiclePathsView[i] = paths[i];
+      }
+      if (response.vehicleThreadTimes) {
+        this.vehicleThreadTimes = response.vehicleThreadTimes;
       }
       return true;
     }

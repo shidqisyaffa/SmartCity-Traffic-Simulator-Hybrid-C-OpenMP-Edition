@@ -13,14 +13,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Run Diagnostics Suite
   runSystemTests();
 
-  // Initialize core simulation and canvas renderer
-  const sim = new Simulation();
-  const canvas = document.getElementById("sim-canvas");
-  const renderer = new CanvasRenderer(canvas, sim);
-  
-  // Track visual loop state
-  let animationFrameId = null;
-
   // DOM UI references
   const compModeSelect = document.getElementById("comp-mode");
   const threadSlider = document.getElementById("thread-count");
@@ -42,6 +34,45 @@ document.addEventListener("DOMContentLoaded", async () => {
   const btnResume = document.getElementById("btn-resume");
   const btnStop = document.getElementById("btn-stop");
   const btnReset = document.getElementById("btn-reset");
+
+  // Initialize core simulation and canvas renderer
+  const sim = new Simulation();
+  const canvas = document.getElementById("sim-canvas");
+  const renderer = new CanvasRenderer(canvas, sim);
+  
+  sim.allowedThreadValues = [2, 4, 8, 16]; // default
+  sim.onHardwareDetect = (maxThreads) => {
+    const threadValues = [2, 4, 8, 16];
+    const allowed = threadValues.filter(v => v <= maxThreads);
+    if (allowed.length === 0) allowed.push(2);
+    sim.allowedThreadValues = allowed;
+    
+    threadSlider.min = 0;
+    threadSlider.max = allowed.length - 1;
+    
+    let currentIndex = parseInt(threadSlider.value);
+    if (currentIndex >= allowed.length) {
+      currentIndex = allowed.length - 1;
+      threadSlider.value = currentIndex;
+    }
+    
+    const val = allowed[currentIndex];
+    threadVal.textContent = val;
+    sim.numThreads = val;
+    
+    // Dynamically update the HTML tick labels
+    const ticksContainer = document.querySelector(".slider-ticks");
+    if (ticksContainer) {
+      ticksContainer.innerHTML = allowed.map(v => `<span>${v}</span>`).join('');
+    }
+  };
+  
+  if (sim.maxHardwareThreads) {
+    sim.onHardwareDetect(sim.maxHardwareThreads);
+  }
+  
+  // Track visual loop state
+  let animationFrameId = null;
 
   const statusBadge = document.getElementById("status-badge");
   const actionNotifier = document.getElementById("action-notifier");
@@ -137,6 +168,47 @@ document.addEventListener("DOMContentLoaded", async () => {
   let confirmCallback = null;
   let roadModalFrom = null;
   let roadModalTo = null;
+
+  // Selected Vehicle Details Card DOM References
+  const vehicleDetailsCard = document.getElementById("vehicle-details-card");
+  const detailVehicleId = document.getElementById("detail-vehicle-id");
+  const detailVehicleType = document.getElementById("detail-vehicle-type");
+  const detailVehicleState = document.getElementById("detail-vehicle-state");
+  const detailVehicleOrigin = document.getElementById("detail-vehicle-origin");
+  const detailVehicleDestination = document.getElementById("detail-vehicle-destination");
+  const detailVehicleSpeed = document.getElementById("detail-vehicle-speed");
+  const detailVehicleTime = document.getElementById("detail-vehicle-time");
+  const detailVehicleProgress = document.getElementById("detail-vehicle-progress");
+  const btnCloseVehicleDetails = document.getElementById("btn-close-vehicle-details");
+  const btnEditVehicleRoute = document.getElementById("btn-edit-vehicle-route");
+
+  // New Modals DOM References
+  const spawnVehicleModal = document.getElementById("spawn-vehicle-modal");
+  const modalSpawnOrigin = document.getElementById("modal-spawn-origin");
+  const modalSpawnCount = document.getElementById("modal-spawn-count");
+  const modalSpawnDestination = document.getElementById("modal-spawn-destination");
+  const modalSpawnCancel = document.getElementById("modal-spawn-cancel");
+  const modalSpawnBtn = document.getElementById("modal-spawn-btn");
+
+  const editEdgeModal = document.getElementById("edit-edge-modal");
+  const modalEdgeFrom = document.getElementById("modal-edge-from");
+  const modalEdgeTo = document.getElementById("modal-edge-to");
+  const modalEdgeWeight = document.getElementById("modal-edge-weight");
+  const modalEdgeBlocked = document.getElementById("modal-edge-blocked");
+  const modalEdgeCancel = document.getElementById("modal-edge-cancel");
+  const modalEdgeSave = document.getElementById("modal-edge-save");
+
+  const editVehicleModal = document.getElementById("edit-vehicle-modal");
+  const modalVehicleId = document.getElementById("modal-vehicle-id");
+  const modalVehicleOrigin = document.getElementById("modal-vehicle-origin");
+  const modalVehicleDestination = document.getElementById("modal-vehicle-destination");
+  const modalVehicleCancel = document.getElementById("modal-vehicle-cancel");
+  const modalVehicleSave = document.getElementById("modal-vehicle-save");
+
+  // Interactive Variables
+  let activeVehicleId = null;
+  let activeEdgeFrom = null;
+  let activeEdgeTo = null;
 
   // Graph Editing States
   let editMode = "select"; // select, add-node, remove-node, add-road, remove-road
@@ -464,7 +536,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   // Handle mode select
-  compModeSelect.addEventListener("change", () => {
+  compModeSelect.addEventListener("change", async () => {
     sim.mode = compModeSelect.value;
     if (sim.mode === "sequential") {
       threadGroup.style.opacity = "0.4";
@@ -475,21 +547,28 @@ document.addEventListener("DOMContentLoaded", async () => {
       threadSlider.disabled = false;
       notify(`Switched to Parallel computing mode with ${sim.numThreads} threads.`);
     }
+    
+    // Trigger real-time calculation and refresh dashboard metrics
+    if (sim.getGraphBoundary() > 0) {
+      await sim.calculateShortestPaths();
+      updateDashboardMetrics();
+    }
     updateThreadVisuals();
   });
 
-  // Handle threads slider
+  // Handle threads slider (values: 2, 4, 8, 16 — angka 1 tidak tersedia di mode paralel;
+  // gunakan tombol Sequential (Single-Thread) di dropdown untuk eksekusi 1-thread)
   threadSlider.addEventListener("input", async () => {
-    const val = parseInt(threadSlider.value);
+    const index = parseInt(threadSlider.value);
+    const val = sim.allowedThreadValues[index] || 2;
     threadVal.textContent = val;
     sim.numThreads = val;
-    notify(`Thread allocation updated to ${val}.`);
+    notify(`Thread allocation updated to ${val} parallel threads.`);
     
-    // Spawn threads if simulation is running/paused in parallel mode
-    if (sim.state !== "stopped" && sim.mode === "parallel") {
-      notify(`Re-spawning worker threads pool to ${val}...`);
-      await sim.initializeWorkerPool();
-      notify(`Worker pool successfully adjusted to ${val} threads.`);
+    // Trigger real-time calculation and refresh dashboard metrics
+    if (sim.getGraphBoundary() > 0) {
+      await sim.calculateShortestPaths();
+      updateDashboardMetrics();
     }
     updateThreadVisuals();
   });
@@ -623,11 +702,20 @@ document.addEventListener("DOMContentLoaded", async () => {
     updateUIForStatus("stopped");
     notify("Simulation stopped. Workers terminated.");
     updateThreadVisuals();
+    if (vehicleDetailsCard) {
+      vehicleDetailsCard.classList.add("hidden");
+      renderer.selectedVehicleId = null;
+      activeVehicleId = null;
+    }
   });
 
   btnReset.addEventListener("click", async () => {
     await sim.reset();
     renderer.selectedVehicleId = null; // Clear selection
+    if (vehicleDetailsCard) {
+      vehicleDetailsCard.classList.add("hidden");
+      activeVehicleId = null;
+    }
     updateUIForStatus("stopped");
     notify("Simulation reset. All metrics cleared.");
     updateDashboardMetrics();
@@ -637,6 +725,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Tick updates listener
   sim.onTickCallback = (metrics) => {
     updateDashboardMetrics(metrics);
+    updateThreadVisuals(); // Update thread monitor telemetry every tick
+    if (activeVehicleId !== null) {
+      updateVehicleDetailsUI();
+    }
   };
 
   // Sync dashboard values
@@ -847,40 +939,95 @@ document.addEventListener("DOMContentLoaded", async () => {
     statBlockedCount.textContent = blockedCount;
   }
 
-  // Update visual worker activity progress bars in right panel
+  // Update visual worker activity monitor — renders boxes dynamically based on sim.numThreads
+  // Supports 2, 4, 8, 16 workers with compact grid layout for high thread counts
   function updateThreadVisuals() {
     if (sim.mode === "sequential" || sim.state === "stopped") {
       workerActivityList.innerHTML = `<div class="description-text" style="text-align:center; padding: 10px 0;">Thread monitor inactive in Sequential Mode.</div>`;
       return;
     }
 
-    let html = "";
-    for (let i = 0; i < sim.numThreads; i++) {
-      const stateCode = sim.syncView[4 + i]; // Offset by 4 in sync array
-      let stateText = "IDLE";
-      let barClass = "worker-idle";
-      
-      if (stateCode === 1) {
-        stateText = "FW COMPUTE";
-        barClass = "worker-fw";
-      } else if (stateCode === 2) {
-        stateText = "VEHICLE UPDATE";
-        barClass = "worker-update";
-      }
+    const useCompact = sim.numThreads >= 8; // Use compact grid for 8+ workers
 
-      html += `
-        <div class="worker-bar-item">
-          <div class="worker-bar-lbl">
-            <span>Worker #${i + 1}</span>
-            <span class="worker-bar-state" style="color: ${stateCode === 1 ? '#a5b4fc' : stateCode === 2 ? '#34d399' : '#9ca3af'}">${stateText}</span>
+    if (useCompact) {
+      // Compact mini-grid for 8 or 16 workers
+      let gridHtml = `<div class="worker-grid" style="display:grid;grid-template-columns:repeat(${sim.numThreads >= 16 ? 4 : 2},1fr);gap:4px;margin-top:4px;">`;
+      for (let i = 0; i < sim.numThreads; i++) {
+        const stateCode = sim.threadStates[i] || 0;
+        const coreNum = sim.threadCores[i] !== undefined ? sim.threadCores[i] : -1;
+        let stateLabel = "IDLE";
+        let boxColor = "rgba(55,65,81,0.6)";      // grey — idle
+        let borderColor = "rgba(75,85,99,0.8)";
+        let textColor = "#9ca3af";
+        let pulseClass = "";
+
+        if (stateCode === 1) {
+          stateLabel = "FW";
+          boxColor = "rgba(67,56,202,0.35)";       // indigo — floyd-warshall
+          borderColor = "rgba(99,102,241,0.8)";
+          textColor = "#a5b4fc";
+          pulseClass = "worker-pulse-fw";
+        } else if (stateCode === 2) {
+          stateLabel = "UPD";
+          boxColor = "rgba(4,120,87,0.35)";        // emerald — vehicle update
+          borderColor = "rgba(16,185,129,0.8)";
+          textColor = "#34d399";
+          pulseClass = "worker-pulse-upd";
+        }
+
+        let coreLabel = coreNum !== -1 ? `Core: ${coreNum}` : "Core: -";
+
+        gridHtml += `
+          <div class="worker-mini-box ${pulseClass}" style="
+            background:${boxColor};
+            border:1px solid ${borderColor};
+            border-radius:5px;
+            padding:4px 3px;
+            text-align:center;
+            font-size:0.58rem;
+            color:${textColor};
+            font-family:monospace;
+          ">
+            <div style="font-weight:600;font-size:0.6rem;opacity:0.7;">TID #${i+1}</div>
+            <div style="font-size:0.55rem;opacity:0.9;">${coreLabel}</div>
+            <div>${stateLabel}</div>
+          </div>`;
+      }
+      gridHtml += `</div>`;
+      workerActivityList.innerHTML = gridHtml;
+    } else {
+      // Full-size bar layout for 2 or 4 workers
+      let html = "";
+      for (let i = 0; i < sim.numThreads; i++) {
+        const stateCode = sim.threadStates[i] || 0;
+        const coreNum = sim.threadCores[i] !== undefined ? sim.threadCores[i] : -1;
+        let stateText = "IDLE";
+        let barClass = "worker-idle";
+
+        if (stateCode === 1) {
+          stateText = "FW COMPUTE";
+          barClass = "worker-fw";
+        } else if (stateCode === 2) {
+          stateText = "VEHICLE UPDATE";
+          barClass = "worker-update";
+        }
+
+        let coreLabel = coreNum !== -1 ? `Core: ${coreNum}` : "Core: -";
+
+        html += `
+          <div class="worker-bar-item">
+            <div class="worker-bar-lbl">
+              <span>Thread ID #${i + 1} (${coreLabel})</span>
+              <span class="worker-bar-state" style="color: ${stateCode === 1 ? '#a5b4fc' : stateCode === 2 ? '#34d399' : '#9ca3af'}">${stateText}</span>
+            </div>
+            <div class="worker-bar-track">
+              <div class="worker-bar-fill ${barClass}"></div>
+            </div>
           </div>
-          <div class="worker-bar-track">
-            <div class="worker-bar-fill ${barClass}"></div>
-          </div>
-        </div>
-      `;
+        `;
+      }
+      workerActivityList.innerHTML = html;
     }
-    workerActivityList.innerHTML = html;
   }
 
   // Update button visibility
@@ -949,39 +1096,41 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (selectedVehicleId !== null) {
         renderer.selectedVehicleId = selectedVehicleId;
         notify(`Selected Vehicle #${selectedVehicleId}. Active path highlighted.`);
+        showVehicleDetailsCard(selectedVehicleId);
         renderer.draw();
         return;
       }
 
-      if (sim.state === "running") {
-        notify("Please pause or stop simulation to block/unblock roads.");
+      // Check if Node is clicked
+      const clickedNode = getClickedNode(mouseX, mouseY, 15);
+      if (clickedNode !== null) {
+        if (sim.state === "running") {
+          notify("Please pause or stop simulation to spawn vehicles manually.");
+          return;
+        }
+        showSpawnVehicleModal(clickedNode);
         return;
       }
 
+      // Check if Edge is clicked
       const clickedEdge = getClickedEdge(mouseX, mouseY, 8);
       if (clickedEdge) {
-        const from = clickedEdge.from;
-        const to = clickedEdge.to;
-        const isBlocked = sim.graph.isBlocked(from, to);
-
-        if (isBlocked) {
-          sim.graph.unblockRoad(from, to, true); // unblock two-way
-          notify(`Road segment ${from} ➔ ${to} Unblocked.`);
-        } else {
-          sim.graph.blockRoad(from, to, true); // block two-way
-          notify(`Road segment ${from} ➔ ${to} Blocked! Dynamic rerouting triggered.`);
+        if (sim.state === "running") {
+          notify("Please pause or stop simulation to edit road properties.");
+          return;
         }
-
-        notify("Recalculating routing matrices...");
-        const t = await sim.calculateShortestPaths();
-        notify(`Routing matrices updated in ${t.toFixed(2)}ms.`);
-        updateGraphStatsPanel();
-        renderer.draw();
-      } else {
-        renderer.selectedVehicleId = null;
-        renderer.draw();
+        showEditEdgeModal(clickedEdge.from, clickedEdge.to);
+        return;
       }
-    } 
+
+      // Clicked empty space
+      renderer.selectedVehicleId = null;
+      if (vehicleDetailsCard) {
+        vehicleDetailsCard.classList.add("hidden");
+        activeVehicleId = null;
+      }
+      renderer.draw();
+    }
     else if (editMode === "add-node") {
       if (sim.state === "running") {
         notify("Please pause or stop simulation to edit the graph.");
@@ -1137,6 +1286,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     notify("Compiling performance stats from current session...");
+
+
+
     const benchmarkData = sim.getSessionAverages();
     notify("Generating CSV report...");
 
@@ -1201,7 +1353,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Section 2: Vehicle Journey Statistics
     csvContent += "--- VEHICLE JOURNEY STATISTICS ---\n";
-    csvContent += "Vehicle ID,Vehicle Type,State Code,Origin,Destination,Progress (%),Travel Time (s)\n";
+    csvContent += "Vehicle ID,Vehicle Type,State Code,Origin,Destination,Progress (%),Travel Time Thread 1 (s),Travel Time Thread 2 (s),Travel Time Thread 4 (s),Travel Time Thread 8 (s),Travel Time Thread 16 (s)\n";
 
     for (let i = 0; i < sim.totalVehicles; i++) {
       const offset = i * 8;
@@ -1212,12 +1364,17 @@ document.addEventListener("DOMContentLoaded", async () => {
       const destination = sim.vehicleIntsView[offset + 4];
       
       const progress = sim.vehicleFloatsView[offset] * 100;
-      const travelTime = sim.vehicleFloatsView[offset + 2];
+      
+      const t1 = sim.vehicleThreadTimes ? sim.vehicleThreadTimes[i * 5 + 0] : 0.0;
+      const t2 = sim.vehicleThreadTimes ? sim.vehicleThreadTimes[i * 5 + 1] : 0.0;
+      const t4 = sim.vehicleThreadTimes ? sim.vehicleThreadTimes[i * 5 + 2] : 0.0;
+      const t8 = sim.vehicleThreadTimes ? sim.vehicleThreadTimes[i * 5 + 3] : 0.0;
+      const t16 = sim.vehicleThreadTimes ? sim.vehicleThreadTimes[i * 5 + 4] : 0.0;
 
       const typeStr = type === 0 ? "Mobil" : type === 1 ? "Motor" : "Bus";
       const stateStr = state === 0 ? "Finished" : state === 1 ? "Moving" : state === 2 ? "Waiting" : "Stuck";
 
-      csvContent += `${id},${typeStr},${stateStr},${origin},${destination},${progress.toFixed(1)}%,${travelTime.toFixed(2)}\n`;
+      csvContent += `${id},${typeStr},${stateStr},${origin},${destination},${progress.toFixed(1)}%,${t1.toFixed(2)},${t2.toFixed(2)},${t4.toFixed(2)},${t8.toFixed(2)},${t16.toFixed(2)}\n`;
     }
 
     const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
@@ -1452,7 +1609,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       renderSVGCharts(sequentialBaseline, results);
       
       // Draw Amdahl's Law automatically
-      const s4 = results.speedup[2]; // 4 threads speedup
+      const idx4 = results.threads.indexOf(4);
+      const s4 = idx4 !== -1 ? results.speedup[idx4] : 0;
       const rawF = s4 > 0 ? ((1 / s4) - 0.25) / 0.75 : 0;
       const f = Math.min(1.0, Math.max(0.0, rawF));
 
@@ -1536,7 +1694,12 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Custom SVG charting renderers
   function renderSVGCharts(seqVal, data) {
-    const xCoords = [60, 110, 160, 210, 260];
+    // Dynamically space coordinates based on the number of thread points (typically 4: 2T, 4T, 8T, 16T)
+    const xCoords = [];
+    const step = 220 / (data.threads.length - 1 || 1);
+    for (let i = 0; i < data.threads.length; i++) {
+      xCoords.push(60 + i * step);
+    }
 
     // 1. Time Chart
     let svgTime = `<svg width="100%" height="100%" viewBox="0 0 300 150" style="background:#1f293700">`;
@@ -1637,4 +1800,206 @@ document.addEventListener("DOMContentLoaded", async () => {
     svgEff += `</svg>`;
     chartEfficiency.innerHTML = svgEff;
   }
+
+  // --- Modal Helpers & Selected Vehicle Details card logic ---
+
+  function showSpawnVehicleModal(nodeId) {
+    modalSpawnOrigin.textContent = nodeId;
+    modalSpawnCount.value = 1;
+    
+    // Populate destination dropdown with all active nodes except origin
+    let html = `<option value="-1">Random Destination</option>`;
+    const V = sim.getGraphBoundary();
+    for (let i = 0; i < V; i++) {
+      if (sim.graph.activeNodes[i] === 1 && i !== nodeId) {
+        html += `<option value="${i}">Intersection #${i}</option>`;
+      }
+    }
+    modalSpawnDestination.innerHTML = html;
+    spawnVehicleModal.classList.remove("hidden");
+  }
+
+  modalSpawnCancel.addEventListener("click", () => {
+    spawnVehicleModal.classList.add("hidden");
+  });
+
+  modalSpawnBtn.addEventListener("click", async () => {
+    const origin = parseInt(modalSpawnOrigin.textContent);
+    const count = parseInt(modalSpawnCount.value);
+    const target = parseInt(modalSpawnDestination.value);
+    
+    if (isNaN(count) || count <= 0) {
+      alert("Please enter a valid count.");
+      return;
+    }
+    
+    spawnVehicleModal.classList.add("hidden");
+    notify("Spawning vehicle(s)...");
+    const success = await sim.addManualVehicles(count, origin, target);
+    if (success) {
+      if (sim.state === "finished" && sim.activeVehicles > 0) {
+        updateUIForStatus("paused");
+      }
+      updateDashboardMetrics();
+      notify(`Spawned ${count} vehicles starting at Node #${origin}.`);
+    } else {
+      notify("Failed to spawn vehicle.");
+    }
+    renderer.draw();
+  });
+
+  function showEditEdgeModal(from, to) {
+    activeEdgeFrom = from;
+    activeEdgeTo = to;
+    modalEdgeFrom.textContent = from;
+    modalEdgeTo.textContent = to;
+    
+    const currentWeight = sim.graph.weights[from * MAX_VERTICES + to];
+    modalEdgeWeight.value = currentWeight;
+    
+    const isBlocked = sim.graph.blocked[from * MAX_VERTICES + to] === 1;
+    modalEdgeBlocked.value = isBlocked ? "blocked" : "unblocked";
+    
+    editEdgeModal.classList.remove("hidden");
+  }
+
+  modalEdgeCancel.addEventListener("click", () => {
+    editEdgeModal.classList.add("hidden");
+  });
+
+  modalEdgeSave.addEventListener("click", async () => {
+    const from = activeEdgeFrom;
+    const to = activeEdgeTo;
+    const weight = parseFloat(modalEdgeWeight.value);
+    const blockedVal = modalEdgeBlocked.value === "blocked";
+    
+    if (isNaN(weight) || weight <= 0) {
+      alert("Weight must be a positive number.");
+      return;
+    }
+    
+    editEdgeModal.classList.add("hidden");
+    notify("Updating road properties...");
+    
+    const reverseExists = sim.graph.weights[to * MAX_VERTICES + from] !== Infinity;
+    
+    sim.graph.weights[from * MAX_VERTICES + to] = weight;
+    sim.graph.blocked[from * MAX_VERTICES + to] = blockedVal ? 1 : 0;
+    
+    await sim.sendRequest(`ADD_EDGE ${from} ${to} ${weight} 0`, "success");
+    await sim.sendRequest(`BLOCK_ROAD ${from} ${to} ${blockedVal ? 1 : 0}`, "success");
+    
+    if (reverseExists) {
+      sim.graph.weights[to * MAX_VERTICES + from] = weight;
+      sim.graph.blocked[to * MAX_VERTICES + from] = blockedVal ? 1 : 0;
+      await sim.sendRequest(`ADD_EDGE ${to} ${from} ${weight} 0`, "success");
+      await sim.sendRequest(`BLOCK_ROAD ${to} ${from} ${blockedVal ? 1 : 0}`, "success");
+    }
+    
+    notify("Recalculating shortest paths...");
+    await sim.calculateShortestPaths();
+    updateGraphStatsPanel();
+    notify(`Road segment properties updated for ${from} ➔ ${to}.`);
+    renderer.draw();
+  });
+
+  function showVehicleDetailsCard(vehicleId) {
+    activeVehicleId = vehicleId;
+    updateVehicleDetailsUI();
+    vehicleDetailsCard.classList.remove("hidden");
+  }
+
+  function updateVehicleDetailsUI() {
+    if (activeVehicleId === null || activeVehicleId >= sim.totalVehicles) return;
+    
+    const vOffset = activeVehicleId * 8;
+    const id = sim.vehicleIntsView[vOffset];
+    const type = sim.vehicleIntsView[vOffset + 1];
+    const state = sim.vehicleIntsView[vOffset + 2];
+    const origin = sim.vehicleIntsView[vOffset + 3];
+    const destination = sim.vehicleIntsView[vOffset + 4];
+    
+    const speed = sim.vehicleFloatsView[vOffset + 1];
+    const travelTime = sim.vehicleFloatsView[vOffset + 2];
+    const progress = sim.vehicleFloatsView[vOffset] * 100;
+    
+    const typeStr = type === 0 ? "Mobil" : type === 1 ? "Motor" : "Bus";
+    const stateStr = state === 0 ? "Finished" : state === 1 ? "Moving" : state === 2 ? "Waiting" : "Stuck";
+    
+    detailVehicleId.textContent = `#${id}`;
+    detailVehicleType.textContent = typeStr;
+    detailVehicleState.textContent = stateStr;
+    detailVehicleOrigin.textContent = `Intersection #${origin}`;
+    detailVehicleDestination.textContent = `Intersection #${destination}`;
+    detailVehicleSpeed.textContent = `${speed.toFixed(1)} px/s`;
+    detailVehicleTime.textContent = `${travelTime.toFixed(1)}s`;
+    detailVehicleProgress.textContent = `${progress.toFixed(0)}%`;
+  }
+
+  btnCloseVehicleDetails.addEventListener("click", () => {
+    vehicleDetailsCard.classList.add("hidden");
+    renderer.selectedVehicleId = null;
+    activeVehicleId = null;
+    renderer.draw();
+  });
+
+  btnEditVehicleRoute.addEventListener("click", () => {
+    if (activeVehicleId !== null) {
+      showEditVehicleModal(activeVehicleId);
+    }
+  });
+
+  function showEditVehicleModal(vehicleId) {
+    modalVehicleId.textContent = vehicleId;
+    
+    const vOffset = vehicleId * 8;
+    const currentOrigin = sim.vehicleIntsView[vOffset + 3];
+    const currentDest = sim.vehicleIntsView[vOffset + 4];
+    
+    let html = "";
+    const V = sim.getGraphBoundary();
+    for (let i = 0; i < V; i++) {
+      if (sim.graph.activeNodes[i] === 1) {
+        html += `<option value="${i}">Intersection #${i}</option>`;
+      }
+    }
+    
+    modalVehicleOrigin.innerHTML = html;
+    modalVehicleDestination.innerHTML = html;
+    
+    modalVehicleOrigin.value = currentOrigin;
+    modalVehicleDestination.value = currentDest;
+    
+    editVehicleModal.classList.remove("hidden");
+  }
+
+  modalVehicleCancel.addEventListener("click", () => {
+    editVehicleModal.classList.add("hidden");
+  });
+
+  modalVehicleSave.addEventListener("click", async () => {
+    const id = parseInt(modalVehicleId.textContent);
+    const origin = parseInt(modalVehicleOrigin.value);
+    const destination = parseInt(modalVehicleDestination.value);
+    
+    if (origin === destination) {
+      alert("Start and destination nodes cannot be the same intersection.");
+      return;
+    }
+    
+    editVehicleModal.classList.add("hidden");
+    notify(`Re-routing Vehicle #${id}...`);
+    
+    const success = await sim.updateVehicle(id, origin, destination);
+    if (success) {
+      notify(`Vehicle #${id} successfully routed from Intersection #${origin} to #${destination}.`);
+      updateVehicleDetailsUI();
+      if (sim.state === "finished" && sim.activeVehicles > 0) {
+        updateUIForStatus("paused");
+      }
+    } else {
+      notify(`Failed to update vehicle route.`);
+    }
+    renderer.draw();
+  });
 });

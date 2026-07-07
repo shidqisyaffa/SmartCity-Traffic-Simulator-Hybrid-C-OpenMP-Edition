@@ -52,13 +52,16 @@
             <label for="comp-mode">Execution Mode</label>
             <select id="comp-mode">
               <option value="sequential">Sequential (Single-Thread)</option>
-              <option value="parallel" selected>Parallel (Web Workers)</option>
+              <option value="parallel" selected>Parallel (OpenMP Backend)</option>
             </select>
           </div>
 
           <div class="form-group" id="thread-group">
             <label for="thread-count">Alokasi Thread (Worker Pool): <span id="thread-val">4</span></label>
-            <input type="range" id="thread-count" min="1" max="16" step="1" value="4">
+            <input type="range" id="thread-count" min="0" max="3" step="1" value="1">
+            <div class="slider-ticks" style="display:flex;justify-content:space-between;font-size:0.65rem;color:var(--text-muted,#6b7280);margin-top:2px;padding:0 2px;">
+              <span>2</span><span>4</span><span>8</span><span>16</span>
+            </div>
           </div>
 
           <div class="form-group">
@@ -149,6 +152,53 @@
             <button id="btn-zoom-in" title="Zoom In" class="zoom-btn">+</button>
             <button id="btn-zoom-out" title="Zoom Out" class="zoom-btn">-</button>
             <button id="btn-zoom-fit" title="Fit View / Reset" class="zoom-btn">🏠</button>
+          </div>
+
+          <!-- Selected Vehicle Details HUD Card -->
+          <div id="vehicle-details-card" class="vehicle-details-card hidden">
+            <div class="card-header">
+              <h4>🔍 Vehicle Details</h4>
+              <button id="btn-close-vehicle-details" class="close-btn">&times;</button>
+            </div>
+            <div class="card-body">
+              <table class="details-table">
+                <tr>
+                  <td>ID:</td>
+                  <td><span id="detail-vehicle-id">#0</span></td>
+                </tr>
+                <tr>
+                  <td>Type:</td>
+                  <td><span id="detail-vehicle-type">Mobil</span></td>
+                </tr>
+                <tr>
+                  <td>State:</td>
+                  <td><span id="detail-vehicle-state">Moving</span></td>
+                </tr>
+                <tr>
+                  <td>Origin:</td>
+                  <td><span id="detail-vehicle-origin">Intersection #1</span></td>
+                </tr>
+                <tr>
+                  <td>Destination:</td>
+                  <td><span id="detail-vehicle-destination">Intersection #5</span></td>
+                </tr>
+                <tr>
+                  <td>Speed:</td>
+                  <td><span id="detail-vehicle-speed">50.0 px/s</span></td>
+                </tr>
+                <tr>
+                  <td>Travel Time:</td>
+                  <td><span id="detail-vehicle-time">4.5s</span></td>
+                </tr>
+                <tr>
+                  <td>Progress:</td>
+                  <td><span id="detail-vehicle-progress">45%</span></td>
+                </tr>
+              </table>
+              <div style="margin-top: 10px; display: flex; gap: 8px;">
+                <button id="btn-edit-vehicle-route" class="btn btn-secondary btn-xs" style="width: 100%; padding: 4px 8px; font-size: 0.7rem; border-radius: 4px;">✏ Edit Route</button>
+              </div>
+            </div>
           </div>
 
           <div class="canvas-overlay" id="canvas-hint">
@@ -474,6 +524,77 @@
       <div class="modal-footer">
         <button id="confirm-btn-cancel" class="btn btn-secondary btn-sm">Cancel</button>
         <button id="confirm-btn-ok" class="btn btn-danger btn-sm">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Spawn Vehicle Modal -->
+  <div id="spawn-vehicle-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <h3 class="modal-title">Spawn Vehicle Here</h3>
+      <div class="modal-body">
+        <p class="modal-desc">Spawning vehicles starting at Intersection #<span id="modal-spawn-origin" class="highlight-val">?</span></p>
+        <div class="form-group">
+          <label>Vehicle Count:</label>
+          <input type="number" id="modal-spawn-count" min="1" max="1000" value="1">
+        </div>
+        <div class="form-group">
+          <label>Destination Node:</label>
+          <select id="modal-spawn-destination">
+            <option value="-1">Random Destination</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="modal-spawn-cancel" class="btn btn-secondary btn-sm">Cancel</button>
+        <button id="modal-spawn-btn" class="btn btn-primary btn-sm">Spawn Vehicles</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit Edge Modal -->
+  <div id="edit-edge-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <h3 class="modal-title">Edit Road Properties</h3>
+      <div class="modal-body">
+        <p class="modal-desc">Road segment between Intersection #<span id="modal-edge-from" class="highlight-val">?</span> and #<span id="modal-edge-to" class="highlight-val">?</span></p>
+        <div class="form-group">
+          <label>Travel Cost (Weight):</label>
+          <input type="number" id="modal-edge-weight" min="1" max="1000" value="10">
+        </div>
+        <div class="form-group">
+          <label>Status:</label>
+          <select id="modal-edge-blocked">
+            <option value="unblocked">Active (Unblocked)</option>
+            <option value="blocked">Blocked</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="modal-edge-cancel" class="btn btn-secondary btn-sm">Cancel</button>
+        <button id="modal-edge-save" class="btn btn-primary btn-sm">Save Changes</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit Vehicle Modal -->
+  <div id="edit-vehicle-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <h3 class="modal-title">Edit Vehicle Route</h3>
+      <div class="modal-body">
+        <p class="modal-desc">Modifying route for Vehicle #<span id="modal-vehicle-id" class="highlight-val">?</span></p>
+        <div class="form-group">
+          <label>Origin Node:</label>
+          <select id="modal-vehicle-origin"></select>
+        </div>
+        <div class="form-group">
+          <label>Destination Node:</label>
+          <select id="modal-vehicle-destination"></select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="modal-vehicle-cancel" class="btn btn-secondary btn-sm">Cancel</button>
+        <button id="modal-vehicle-save" class="btn btn-primary btn-sm">Save Changes</button>
       </div>
     </div>
   </div>

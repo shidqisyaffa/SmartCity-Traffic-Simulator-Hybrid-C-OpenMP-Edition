@@ -10,9 +10,23 @@
 #include <limits>
 #include <omp.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sched.h>
+#endif
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+int getCurrentCpuCore() {
+#ifdef _WIN32
+    return (int)GetCurrentProcessorNumber();
+#else
+    return (int)sched_getcpu();
+#endif
+}
 
 const int MAX_VERTICES = 1000;
 const int MAX_VEHICLES = 10000;
@@ -24,6 +38,11 @@ int blocked[MAX_VERTICES * MAX_VERTICES];
 float coords[MAX_VERTICES * 2];
 uint8_t activeNodes[MAX_VERTICES];
 
+// Thread information tracking
+std::vector<int> lastThreadCores;
+std::vector<int> lastThreadStates;
+
+
 // Floyd-Warshall cache
 float fwDistance[MAX_VERTICES * MAX_VERTICES];
 int fwNext[MAX_VERTICES * MAX_VERTICES];
@@ -33,6 +52,7 @@ int trafficLights[MAX_VERTICES];
 std::vector<int> vehicleInts;
 std::vector<float> vehicleFloats;
 std::vector<int> vehiclePaths;
+std::vector<float> vehicleThreadTimes;
 
 
 int totalVehicles = 0;
@@ -67,6 +87,7 @@ void spawnVehicles(int count, int seed) {
     vehicleInts.assign(count * 8, 0);
     vehicleFloats.assign(count * 8, 0.0f);
     vehiclePaths.assign(count * 100, 0);
+    vehicleThreadTimes.assign(count * 5, 0.0f);
     totalVehicles = 0;
 
     if (activeNodeIds.size() < 2) {
@@ -136,6 +157,8 @@ void spawnVehicles(int count, int seed) {
 
 // Sequential Floyd-Warshall baseline
 void runSequentialFW(int V, double& out_exec_time) {
+    lastThreadCores.assign(1, getCurrentCpuCore());
+    lastThreadStates.assign(1, 1); // 1 = FW COMPUTE
     auto t_start = std::chrono::high_resolution_clock::now();
 
     for (int i = 0; i < V; ++i) {
@@ -190,6 +213,8 @@ void runSequentialFW(int V, double& out_exec_time) {
 // Parallel Floyd-Warshall with dynamic scheduling
 void runParallelFW(int V, int threads, double& out_exec_time, double& out_sync_overhead) {
     omp_set_num_threads(threads);
+    lastThreadCores.assign(threads, -1);
+    lastThreadStates.assign(threads, 1); // 1 = FW COMPUTE
     auto t_start = std::chrono::high_resolution_clock::now();
 
     std::vector<double> thread_work_time(threads, 0.0);
@@ -197,6 +222,8 @@ void runParallelFW(int V, int threads, double& out_exec_time, double& out_sync_o
     #pragma omp parallel
     {
         int tid = omp_get_thread_num();
+        lastThreadCores[tid] = getCurrentCpuCore();
+        lastThreadStates[tid] = 1;
         auto t_work_start = std::chrono::high_resolution_clock::now();
 
         #pragma omp for schedule(static)
@@ -227,6 +254,8 @@ void runParallelFW(int V, int threads, double& out_exec_time, double& out_sync_o
         #pragma omp parallel
         {
             int tid = omp_get_thread_num();
+            lastThreadCores[tid] = getCurrentCpuCore();
+            lastThreadStates[tid] = 1;
             auto t_work_start = std::chrono::high_resolution_clock::now();
 
             #pragma omp for schedule(dynamic)
@@ -269,10 +298,47 @@ void runParallelFW(int V, int threads, double& out_exec_time, double& out_sync_o
 
 // Sequential vehicle simulation step
 void runSequentialVehicles(float tickRate, double& out_exec_time) {
+    lastThreadCores.assign(1, getCurrentCpuCore());
+    lastThreadStates.assign(1, 2); // 2 = VEHICLE UPDATE
     float dt = tickRate / 1000.0f;
     auto t_start = std::chrono::high_resolution_clock::now();
 
     std::vector<int> candidates(MAX_VERTICES, -1);
+
+    // Pre-tick analyzer for Traffic-Adaptive Queueing
+    std::vector<std::vector<int>> queuedIncomingPerNode(MAX_VERTICES);
+    std::vector<std::vector<int>> allIncomingPerNode(MAX_VERTICES);
+
+    for (int v = 0; v < MAX_VERTICES; ++v) {
+        if (activeNodes[v] == 1) {
+            for (int tempU = 0; tempU < MAX_VERTICES; ++tempU) {
+                if (activeNodes[tempU] == 1 && tempU != v &&
+                    weights[tempU * MAX_VERTICES + v] != INF &&
+                    blocked[tempU * MAX_VERTICES + v] == 0) {
+                    allIncomingPerNode[v].push_back(tempU);
+                }
+            }
+        }
+    }
+
+    for (int i = 0; i < totalVehicles; ++i) {
+        int vOffset = i * 8;
+        int state = vehicleInts[vOffset + 2];
+        if (state != 1 && state != 2 && state != 3) continue;
+
+        int currentPathIndex = vehicleInts[vOffset + 5];
+        int vPathOffset = i * 100;
+        int u = vehiclePaths[vPathOffset + currentPathIndex];
+        int v = vehiclePaths[vPathOffset + currentPathIndex + 1];
+        float progress = vehicleFloats[vOffset];
+
+        if (progress >= 1.0f && v >= 0 && v < MAX_VERTICES) {
+            auto& q = queuedIncomingPerNode[v];
+            if (std::find(q.begin(), q.end(), u) == q.end()) {
+                q.push_back(u);
+            }
+        }
+    }
 
     for (int i = 0; i < totalVehicles; ++i) {
         int vOffset = i * 8;
@@ -291,6 +357,9 @@ void runSequentialVehicles(float tickRate, double& out_exec_time) {
         float delayCounter = vehicleFloats[vOffset + 7];
 
         travelTime += dt;
+        if (i * 5 < (int)vehicleThreadTimes.size()) {
+            vehicleThreadTimes[i * 5 + 0] += dt; // Thread 1 for sequential
+        }
 
         if (state == 2) {
             delayCounter -= dt;
@@ -331,11 +400,21 @@ void runSequentialVehicles(float tickRate, double& out_exec_time) {
                     if (v == destination) {
                         state = 0; // Finished
                     } else {
-                        // Traffic Light Check (modulo tickCount)
-                        int light = ((tickCount + v * 5) % 40 < 20) ? 1 : 0;
-                        if (light == 1) {
+                        // Traffic Light Check: Traffic-Adaptive Queueing (cycle only queued lanes)
+                        bool isRed = false;
+                        const auto& queued = queuedIncomingPerNode[v];
+                        const auto& targets = queued.empty() ? allIncomingPerNode[v] : queued;
+
+                        if (targets.size() > 1) {
+                            int green_idx = (tickCount / 30) % targets.size();
+                            if (targets[green_idx] != u) {
+                                isRed = true;
+                            }
+                        }
+
+                        if (isRed) {
                             state = 2; // Waiting (Red light)
-                            delayCounter = 0.1f;
+                            delayCounter = 0.0f; // Hapus delay buatan 0.1s
                         } else {
                             // Green: request crossing
                             if (candidates[v] == -1 || id < candidates[v]) {
@@ -349,12 +428,12 @@ void runSequentialVehicles(float tickRate, double& out_exec_time) {
                 int nextV = vehiclePaths[vPathOffset + currentPathIndex + 1];
 
                 float ux = coords[nextU * 2];
-                float uy = coords[nextU * 2 + 1];
+                float pointer_y = coords[nextU * 2 + 1];
                 float vx = coords[nextV * 2];
                 float vy = coords[nextV * 2 + 1];
 
                 float x = ux + (vx - ux) * progress;
-                float y = uy + (vy - uy) * progress;
+                float y = pointer_y + (vy - pointer_y) * progress;
 
                 vehicleFloats[vOffset + 3] = x;
                 vehicleFloats[vOffset + 4] = y;
@@ -378,8 +457,8 @@ void runSequentialVehicles(float tickRate, double& out_exec_time) {
             currentPathIndex += 1;
             vehicleInts[vOffset + 5] = currentPathIndex;
             vehicleFloats[vOffset] = 0.0f; // Reset progress
-            vehicleInts[vOffset + 2] = 2;   // State: Waiting (crossing time)
-            vehicleFloats[vOffset + 7] = 0.5f; // crossing time delay in seconds
+            vehicleInts[vOffset + 2] = 1;   // State: Moving (langsung jalan instan, hapus 0.5s delay)
+            vehicleFloats[vOffset + 7] = 0.0f;
         }
     }
 
@@ -389,6 +468,8 @@ void runSequentialVehicles(float tickRate, double& out_exec_time) {
 
 // Parallel vehicle simulation step with lock-free partitioning + reduction
 void runParallelVehicles(int threads, float tickRate, double& out_exec_time, double& out_sync_overhead) {
+    lastThreadCores.assign(threads, -1);
+    lastThreadStates.assign(threads, 2); // 2 = VEHICLE UPDATE
     float dt = tickRate / 1000.0f;
     int num_threads = threads;
     omp_set_num_threads(num_threads);
@@ -396,11 +477,48 @@ void runParallelVehicles(int threads, float tickRate, double& out_exec_time, dou
     std::vector<int> thread_candidates(num_threads * MAX_VERTICES, -1);
     std::vector<double> thread_work_time(num_threads, 0.0);
 
+    // Pre-tick analyzer for Traffic-Adaptive Queueing
+    std::vector<std::vector<int>> queuedIncomingPerNode(MAX_VERTICES);
+    std::vector<std::vector<int>> allIncomingPerNode(MAX_VERTICES);
+
+    for (int v = 0; v < MAX_VERTICES; ++v) {
+        if (activeNodes[v] == 1) {
+            for (int tempU = 0; tempU < MAX_VERTICES; ++tempU) {
+                if (activeNodes[tempU] == 1 && tempU != v &&
+                    weights[tempU * MAX_VERTICES + v] != INF &&
+                    blocked[tempU * MAX_VERTICES + v] == 0) {
+                    allIncomingPerNode[v].push_back(tempU);
+                }
+            }
+        }
+    }
+
+    for (int i = 0; i < totalVehicles; ++i) {
+        int vOffset = i * 8;
+        int state = vehicleInts[vOffset + 2];
+        if (state != 1 && state != 2 && state != 3) continue;
+
+        int currentPathIndex = vehicleInts[vOffset + 5];
+        int vPathOffset = i * 100;
+        int u = vehiclePaths[vPathOffset + currentPathIndex];
+        int v = vehiclePaths[vPathOffset + currentPathIndex + 1];
+        float progress = vehicleFloats[vOffset];
+
+        if (progress >= 1.0f && v >= 0 && v < MAX_VERTICES) {
+            auto& q = queuedIncomingPerNode[v];
+            if (std::find(q.begin(), q.end(), u) == q.end()) {
+                q.push_back(u);
+            }
+        }
+    }
+
     auto t_start = std::chrono::high_resolution_clock::now();
 
     #pragma omp parallel
     {
         int tid = omp_get_thread_num();
+        lastThreadCores[tid] = getCurrentCpuCore();
+        lastThreadStates[tid] = 2; // 2 = VEHICLE UPDATE
         auto t_work_start = std::chrono::high_resolution_clock::now();
 
         #pragma omp for schedule(static)
@@ -421,6 +539,15 @@ void runParallelVehicles(int threads, float tickRate, double& out_exec_time, dou
             float delayCounter = vehicleFloats[vOffset + 7];
 
             travelTime += dt;
+            int t_idx = -1;
+            if (threads == 1) t_idx = 0;
+            else if (threads == 2) t_idx = 1;
+            else if (threads == 4) t_idx = 2;
+            else if (threads == 8) t_idx = 3;
+            else if (threads == 16) t_idx = 4;
+            if (t_idx != -1 && i * 5 + t_idx < (int)vehicleThreadTimes.size()) {
+                vehicleThreadTimes[i * 5 + t_idx] += dt;
+            }
 
             if (state == 2) {
                 delayCounter -= dt;
@@ -461,11 +588,21 @@ void runParallelVehicles(int threads, float tickRate, double& out_exec_time, dou
                         if (v == destination) {
                             state = 0; // Finished
                         } else {
-                            // Traffic Light Check (modulo tickCount)
-                            int light = ((tickCount + v * 5) % 40 < 20) ? 1 : 0;
-                            if (light == 1) {
+                            // Traffic Light Check: Traffic-Adaptive Queueing (cycle only queued lanes)
+                            bool isRed = false;
+                            const auto& queued = queuedIncomingPerNode[v];
+                            const auto& targets = queued.empty() ? allIncomingPerNode[v] : queued;
+
+                            if (targets.size() > 1) {
+                                int green_idx = (tickCount / 30) % targets.size();
+                                if (targets[green_idx] != u) {
+                                    isRed = true;
+                                }
+                            }
+
+                            if (isRed) {
                                 state = 2; // Waiting (Red light)
-                                delayCounter = 0.1f;
+                                delayCounter = 0.0f; // Hapus delay buatan 0.1s
                             } else {
                                 // Green: request crossing
                                 int current_candidate = thread_candidates[tid * MAX_VERTICES + v];
@@ -525,8 +662,8 @@ void runParallelVehicles(int threads, float tickRate, double& out_exec_time, dou
             currentPathIndex += 1;
             vehicleInts[vOffset + 5] = currentPathIndex;
             vehicleFloats[vOffset] = 0.0f; // Reset progress
-            vehicleInts[vOffset + 2] = 2;   // State: Waiting
-            vehicleFloats[vOffset + 7] = 0.5f; // crossing time delay
+            vehicleInts[vOffset + 2] = 1;   // State: Moving (langsung jalan instan, hapus 0.5s delay)
+            vehicleFloats[vOffset + 7] = 0.0f;
         }
     }
 
@@ -618,23 +755,28 @@ void runBenchmark(std::string& out_json) {
     }
     seq_time = seq_sum / runsCount;
 
-    std::vector<int> threadRuns = {1, 2, 4, 8, 16};
+    std::vector<int> threadRuns = {2, 4, 8, 16};
     std::vector<double> par_times;
     std::vector<double> par_overheads;
-
+    int maxThreads = omp_get_max_threads();
 
     for (int t : threadRuns) {
-        double par_sum = 0.0;
-        double overhead_sum = 0.0;
-        for (int run = 0; run < runsCount; ++run) {
-            double run_time = 0.0;
-            double overhead = 0.0;
-            runParallelFW(numNodes, t, run_time, overhead);
-            par_sum += run_time;
-            overhead_sum += overhead;
+        if (t > maxThreads) {
+            par_times.push_back(0.0);
+            par_overheads.push_back(0.0);
+        } else {
+            double par_sum = 0.0;
+            double overhead_sum = 0.0;
+            for (int run = 0; run < runsCount; ++run) {
+                double run_time = 0.0;
+                double overhead = 0.0;
+                runParallelFW(numNodes, t, run_time, overhead);
+                par_sum += run_time;
+                overhead_sum += overhead;
+            }
+            par_times.push_back(par_sum / runsCount);
+            par_overheads.push_back(overhead_sum / runsCount);
         }
-        par_times.push_back(par_sum / runsCount);
-        par_overheads.push_back(overhead_sum / runsCount);
     }
 
     std::copy(backup_weights.begin(), backup_weights.end(), weights);
@@ -644,7 +786,7 @@ void runBenchmark(std::string& out_json) {
 
     std::stringstream ss;
     ss << std::fixed << std::setprecision(4);
-    ss << "{\"status\":\"success\",\"type\":\"BENCHMARK_RESULTS\",\"seq_time\":" << seq_time << ",\"threads\":[1,2,4,8,16],\"times\":[";
+    ss << "{\"status\":\"success\",\"type\":\"BENCHMARK_RESULTS\",\"seq_time\":" << seq_time << ",\"threads\":[2,4,8,16],\"times\":[";
     for (size_t i = 0; i < par_times.size(); ++i) {
         ss << par_times[i] << (i == par_times.size() - 1 ? "" : ",");
     }
@@ -774,6 +916,10 @@ int main() {
             }
             std::cout << "{\"status\":\"success\"}" << std::endl;
         }
+        else if (cmd == "GET_HARDWARE_INFO") {
+            int maxThreads = omp_get_max_threads();
+            std::cout << "{\"status\":\"success\",\"type\":\"HARDWARE_INFO\",\"maxThreads\":" << maxThreads << "}" << std::endl;
+        }
         else if (cmd == "SPAWN") {
             int count, seed;
             ss >> count >> seed;
@@ -793,6 +939,10 @@ int main() {
             response << "],\"vehiclePaths\":[";
             for (int i = 0; i < totalVehicles * 100; ++i) {
                 response << vehiclePaths[i] << (i == totalVehicles * 100 - 1 ? "" : ",");
+            }
+            response << "],\"vehicleThreadTimes\":[";
+            for (int i = 0; i < totalVehicles * 5; ++i) {
+                response << std::fixed << std::setprecision(4) << vehicleThreadTimes[i] << (i == totalVehicles * 5 - 1 ? "" : ",");
             }
             response << "]}";
 
@@ -821,7 +971,15 @@ int main() {
             response << "{\"status\":\"success\",\"type\":\"FW\",\"exec_time\":" << exec_time 
                      << ",\"sync_overhead\":" << sync_overhead 
                      << ",\"boundary\":" << boundary 
-                     << ",\"fwDistance\":[";
+                     << ",\"threadCores\":[";
+            for (size_t t = 0; t < lastThreadCores.size(); ++t) {
+                response << lastThreadCores[t] << (t == lastThreadCores.size() - 1 ? "" : ",");
+            }
+            response << "],\"threadStates\":[";
+            for (size_t t = 0; t < lastThreadStates.size(); ++t) {
+                response << lastThreadStates[t] << (t == lastThreadStates.size() - 1 ? "" : ",");
+            }
+            response << "],\"fwDistance\":[";
             for (int i = 0; i < boundary; ++i) {
                 for (int j = 0; j < boundary; ++j) {
                     float val = fwDistance[i * MAX_VERTICES + j];
@@ -892,7 +1050,15 @@ int main() {
                      << ",\"waiting\":" << waiting
                      << ",\"stuck\":" << stuck
                      << "},"
-                     << "\"trafficLights\":[";
+                     << "\"threadCores\":[";
+            for (size_t t = 0; t < lastThreadCores.size(); ++t) {
+                response << lastThreadCores[t] << (t == lastThreadCores.size() - 1 ? "" : ",");
+            }
+            response << "],\"threadStates\":[";
+            for (size_t t = 0; t < lastThreadStates.size(); ++t) {
+                response << lastThreadStates[t] << (t == lastThreadStates.size() - 1 ? "" : ",");
+            }
+            response << "],\"trafficLights\":[";
             for (int i = 0; i < MAX_VERTICES; ++i) {
                 response << trafficLights[i] << (i == MAX_VERTICES - 1 ? "" : ",");
             }
@@ -907,6 +1073,10 @@ int main() {
             response << "],\"vehicleFloats\":[";
             for (int i = 0; i < totalVehicles * 8; ++i) {
                 response << vehicleFloats[i] << (i == totalVehicles * 8 - 1 ? "" : ",");
+            }
+            response << "],\"vehicleThreadTimes\":[";
+            for (int i = 0; i < totalVehicles * 5; ++i) {
+                response << vehicleThreadTimes[i] << (i == totalVehicles * 5 - 1 ? "" : ",");
             }
             response << "]}";
 
@@ -930,6 +1100,11 @@ int main() {
                 vehicleFloats[vOffset + 3] = coords[origin * 2];
                 vehicleFloats[vOffset + 4] = coords[origin * 2 + 1];
                 vehicleFloats[vOffset + 7] = 0.0f; // delay
+
+                // Reset thread travel times
+                for (int t = 0; t < 5; ++t) {
+                    vehicleThreadTimes[i * 5 + t] = 0.0f;
+                }
             }
             std::stringstream response;
             response << std::fixed << std::setprecision(4);
@@ -941,6 +1116,10 @@ int main() {
             response << "],\"vehicleFloats\":[";
             for (int i = 0; i < totalVehicles * 8; ++i) {
                 response << vehicleFloats[i] << (i == totalVehicles * 8 - 1 ? "" : ",");
+            }
+            response << "],\"vehicleThreadTimes\":[";
+            for (int i = 0; i < totalVehicles * 5; ++i) {
+                response << vehicleThreadTimes[i] << (i == totalVehicles * 5 - 1 ? "" : ",");
             }
             response << "]}";
             std::cout << response.str() << std::endl;
@@ -983,6 +1162,7 @@ int main() {
             vehicleInts.resize((prevTotal + count) * 8, 0);
             vehicleFloats.resize((prevTotal + count) * 8, 0.0f);
             vehiclePaths.resize((prevTotal + count) * 100, 0);
+            vehicleThreadTimes.resize((prevTotal + count) * 5, 0.0f);
 
             while (generated < count && attempts < maxAttempts) {
                 attempts++;
@@ -1043,6 +1223,7 @@ int main() {
             vehicleInts.resize(totalVehicles * 8);
             vehicleFloats.resize(totalVehicles * 8);
             vehiclePaths.resize(totalVehicles * 100);
+            vehicleThreadTimes.resize(totalVehicles * 5);
 
             std::stringstream response;
             response << std::fixed << std::setprecision(4);
@@ -1058,6 +1239,10 @@ int main() {
             response << "],\"vehiclePaths\":[";
             for (int i = 0; i < totalVehicles * 100; ++i) {
                 response << vehiclePaths[i] << (i == totalVehicles * 100 - 1 ? "" : ",");
+            }
+            response << "],\"vehicleThreadTimes\":[";
+            for (int i = 0; i < totalVehicles * 5; ++i) {
+                response << vehicleThreadTimes[i] << (i == totalVehicles * 5 - 1 ? "" : ",");
             }
             response << "]}";
 
@@ -1086,20 +1271,25 @@ int main() {
             std::vector<int> threadRuns = {1, 2, 4, 8, 16};
             std::vector<double> par_times;
             std::vector<double> par_overheads;
-
+            int maxThreads = omp_get_max_threads();
 
             for (int t : threadRuns) {
-                double par_sum = 0.0;
-                double overhead_sum = 0.0;
-                for (int run = 0; run < runsCount; ++run) {
-                    double run_time = 0.0;
-                    double overhead = 0.0;
-                    runParallelFW(V, t, run_time, overhead);
-                    par_sum += run_time;
-                    overhead_sum += overhead;
+                if (t > maxThreads) {
+                    par_times.push_back(0.0);
+                    par_overheads.push_back(0.0);
+                } else {
+                    double par_sum = 0.0;
+                    double overhead_sum = 0.0;
+                    for (int run = 0; run < runsCount; ++run) {
+                        double run_time = 0.0;
+                        double overhead = 0.0;
+                        runParallelFW(V, t, run_time, overhead);
+                        par_sum += run_time;
+                        overhead_sum += overhead;
+                    }
+                    par_times.push_back(par_sum / runsCount);
+                    par_overheads.push_back(overhead_sum / runsCount);
                 }
-                par_times.push_back(par_sum / runsCount);
-                par_overheads.push_back(overhead_sum / runsCount);
             }
 
             rerouteActiveVehicles();
@@ -1113,6 +1303,67 @@ int main() {
             response << "],\"overheads\":[";
             for (size_t i = 0; i < par_overheads.size(); ++i) {
                 response << par_overheads[i] << (i == par_overheads.size() - 1 ? "" : ",");
+            }
+            response << "]}";
+
+            std::cout << response.str() << std::endl;
+        }
+        else if (cmd == "UPDATE_VEHICLE") {
+            int id, originVal, destVal;
+            ss >> id >> originVal >> destVal;
+
+            if (id >= 0 && id < totalVehicles && originVal >= 0 && originVal < MAX_VERTICES && destVal >= 0 && destVal < MAX_VERTICES) {
+                if (activeNodes[originVal] == 1 && activeNodes[destVal] == 1 && originVal != destVal) {
+                    std::vector<int> path = reconstructPath(originVal, destVal);
+                    if (path.size() >= 2) {
+                        int vOffset = id * 8;
+                        int vPathOffset = id * 100;
+
+                        vehicleInts[vOffset + 3] = originVal;
+                        vehicleInts[vOffset + 4] = destVal;
+                        vehicleInts[vOffset + 5] = 0; // path index
+                        vehicleInts[vOffset + 6] = path.size();
+                        vehicleInts[vOffset + 2] = 1; // State: Moving
+
+                        vehicleFloats[vOffset] = 0.0f; // progress
+                        vehicleFloats[vOffset + 2] = 0.0f; // travel time
+                        vehicleFloats[vOffset + 3] = coords[originVal * 2];
+                        vehicleFloats[vOffset + 4] = coords[originVal * 2 + 1];
+                        vehicleFloats[vOffset + 7] = 0.0f; // delay
+
+                        // Reset thread travel times
+                        for (int t = 0; t < 5; ++t) {
+                            vehicleThreadTimes[id * 5 + t] = 0.0f;
+                        }
+
+                        for (size_t p = 0; p < path.size(); ++p) {
+                            vehiclePaths[vPathOffset + p] = path[p];
+                        }
+                        for (size_t p = path.size(); p < 100; ++p) {
+                            vehiclePaths[vPathOffset + p] = 0;
+                        }
+                    }
+                }
+            }
+
+            std::stringstream response;
+            response << std::fixed << std::setprecision(4);
+            response << "{\"status\":\"success\",\"type\":\"UPDATE_VEHICLE\",\"totalVehicles\":" << totalVehicles;
+            response << ",\"vehicleInts\":[";
+            for (int i = 0; i < totalVehicles * 8; ++i) {
+                response << vehicleInts[i] << (i == totalVehicles * 8 - 1 ? "" : ",");
+            }
+            response << "],\"vehicleFloats\":[";
+            for (int i = 0; i < totalVehicles * 8; ++i) {
+                response << vehicleFloats[i] << (i == totalVehicles * 8 - 1 ? "" : ",");
+            }
+            response << "],\"vehiclePaths\":[";
+            for (int i = 0; i < totalVehicles * 100; ++i) {
+                response << vehiclePaths[i] << (i == totalVehicles * 100 - 1 ? "" : ",");
+            }
+            response << "],\"vehicleThreadTimes\":[";
+            for (int i = 0; i < totalVehicles * 5; ++i) {
+                response << vehicleThreadTimes[i] << (i == totalVehicles * 5 - 1 ? "" : ",");
             }
             response << "]}";
 

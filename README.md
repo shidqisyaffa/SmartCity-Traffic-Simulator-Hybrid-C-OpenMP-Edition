@@ -46,93 +46,133 @@ http://localhost:3000
 
 ---
 
+## 🧮 Analisis Fundamental: Mengapa Sequential vs Parallel?
+
+### Masalah Komputasi: O(N³) Floyd-Warshall
+
+Inti dari simulator ini adalah algoritma **Floyd-Warshall All-Pairs Shortest Path** (APSP) untuk menghitung rute terpendek seluruh pasangan simpul kota. Kompleksitas waktu algoritma ini adalah **kubik**:
+
+$$T_{seq} = O(N^3)$$
+
+Pada ukuran jaringan kota besar ($N = 1024$ simpul), estimasi jumlah operasi matriks yang harus diselesaikan mencapai **~1,07 miliar** per siklus perhitungan. Jika dijalankan secara **Sekuensial** (1 thread), satu core CPU dipaksa menyelesaikan seluruh operasi sendirian, mengakibatkan:
+- **Bottleneck CPU** yang menyebabkan lag berat pada visual frontend.
+- **Latency respons** terhadap perubahan peta (blokir jalan, rute ulang kendaraan) menjadi sangat tinggi.
+- **Frame-rate rendering Canvas** turun drastis karena WebSocket blocking.
+
+### Solusi Paralel: Dekomposisi Data OpenMP
+
+Dengan OpenMP, loop baris matriks Floyd-Warshall diparalelkan dengan dekomposisi data (iterasi `k` terluar tetap serial karena dependensi data antar-iterasi, sedangkan loop `i` dan `j` diparalelkan):
+
+```cpp
+for (int k = 0; k < N; k++) {            // serial — data dependency
+    #pragma omp parallel for num_threads(P) schedule(dynamic)
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++) {
+            dist[i][j] = min(dist[i][j], dist[i][k] + dist[k][j]);
+        }
+    }
+}
+```
+
+Setiap dari **P** thread mengerjakan partisi baris matriks yang tidak overlapping secara simultan di core fisik AMD Ryzen 7 5700X yang terpisah. Kompleksitas komputasi murni per thread menjadi:
+
+$$T_{par} \approx \frac{O(N^3)}{P}$$
+
+### Tabel Performa Riil (Grid 7×7, V=49 Node)
+
+| Thread (P) | T_P (ms) | Speedup (S) | Efisiensi (E) | Sync Overhead (ms) |
+|:---:|:---:|:---:|:---:|:---:|
+| Seq (1T)   | 0.074   | 1.00×       | 100%          | 0.000              |
+| 2T         | ~1.81   | ~0.04×      | ~2.0%         | ~1.26              |
+| 4T         | ~3.06   | ~0.02×      | ~0.6%         | ~2.26              |
+| 8T         | ~5.16   | ~0.01×      | ~0.18%        | ~3.94              |
+| 16T        | ~9.34   | ~0.008×     | ~0.05%        | ~7.29              |
+
+> **Catatan Akademis:** Pada V=49 (sangat kecil), *overhead* inisialisasi thread OpenMP mendominasi sehingga speedup < 1. Fenomena ini secara ilmiah dikenal sebagai **Parallel Overhead Dominance** — titik crossover terjadi saat ukuran problem cukup besar untuk mengamortisasi biaya manajemen thread. Pada V ≥ 512, speedup paralel mulai nyata terukur.
+
+### Mengapa 8 Thread Optimal? Memory Bandwidth Bottleneck di 16 Thread
+
+Prosesor AMD Ryzen 7 5700X memiliki **8 core fisik** dengan teknologi SMT (Simultaneous Multi-Threading) yang menghadirkan 16 thread logis. Pada alokasi:
+
+- **P = 8 thread**: Masing-masing core fisik mengerjakan satu thread — efisiensi cache L1/L2 per core maksimal, tidak ada sharing resource antar-thread pada satu core. Ini adalah **sweet spot teoritis** sesuai jumlah core fisik.
+- **P = 16 thread**: SMT aktif — dua thread virtual berbagi satu set register fisik dan pipeline eksekusi. Akibatnya terjadi:
+  - **Memory Bandwidth Bottleneck**: Kedua thread saling bersaing memperebutkan bus memori dan cache line yang sama.
+  - **Synchronization Overhead** meningkat drastis: waktu tunggu antar-thread di barrier `#pragma omp barrier` (yang dibutuhkan pada akhir setiap iterasi `k`) menjadi lebih dari 2× lebih lama dibanding P=8.
+
+Ini adalah manifestasi nyata dari **Hukum Amdahl** dan **Batas Skalabilitas (Scalability Limit)** pada arsitektur modern.
+
+---
+
 ## 📚 Technical Highlights (Academic UAS Guidelines)
 
 ### 1. Lock-Free Vehicle Partitioning & Reduction Phase
-To maximize parallel speedup on multi-core systems, the atomic busy-waiting lock contention (`Atomics.compareExchange`) has been removed. In the C++ engine:
+To maximize parallel speedup on multi-core systems:
 * The vehicle array is partitioned linearly among the OpenMP threads.
 * Each thread updates its subset of vehicles independently, logging crossing requests into thread-local arrays without memory locks.
-* At the end of each simulation detak/tick, a reduction phase combines thread requests, resolving intersection conflicts and traffic light logic safely and contention-free.
+* At the end of each simulation tick, a reduction phase combines thread requests, resolving intersection conflicts and traffic light logic safely and contention-free.
 
-### 2. Modulo Traffic Lights Cycle
-Every intersection (vertex) features a simulated traffic light (0 = Green, 1 = Red) changing automatically based on modulo tick counts. Intersections are visually color-coded on the Canvas border (Red for red lights, Green for green lights). Vehicles entering a Red intersection transition to a `Waiting` state lock-free.
+### 2. Traffic-Adaptive Queueing & Congestion Heatmap
 
-### 3. Synchronization Overhead Measurement
-Timing inside OpenMP barriers is captured via high-resolution monotonic clocks (`omp_get_wtime`). This isolates computational runtime from thread synchronization/waiting overhead, providing precise input metrics for Amdahl's Law speedup graphs.
+Setiap persimpangan memiliki lampu lalu lintas cerdas berbasis volume antrean (**Traffic-Adaptive Queueing**). Lampu hijau tidak berputar secara buta pada lajur kosong, melainkan hanya berputar (*round-robin*) secara dinamis pada lajur masuk (*incoming edges*) yang memiliki antrean kendaraan nyata (`progress >= 1.0f`).
+* **Hapus Delay Buatan**: Mengeliminasi delay buatan (`0.5s` crossing delay dan `0.1s` red light delay), sehingga kendaraan langsung bertransisi ke status Moving (`state = 1`) secara instan begitu mendapat prioritas hijau.
+* **Heatmap & Penumpukan**: Kendaraan di lajur merah berstatus `Waiting`, mengubah stroke simpul Canvas menjadi **Merah (Macet)** secara real-time. Hal ini memicu akumulasi visual pada *density heatmap* jalan masuk. Jika persimpangan terblokir atau macet, backend paralel OpenMP menghitung ulang rute alternatif tercepat secara instan tanpa membebani frame-rate visual.
 
-### 4. Interactive Graph Editing & Dynamic Rerouting
-Users can modify the graph topology in real time (Add/Remove Intersection, Add/Remove Road with weights and lane directionality) when paused or stopped. Modifying the graph triggers:
-* Re-calculation of Floyd-Warshall route matrices via sequential/parallel modes.
-* Parallel C++ dynamic vehicle path recalculations (`rerouteActiveVehicles()`) from their next waypoints to their final destinations (no teleportation).
-* Automatic correction for high-DPI mouse scaling and ultrawide aspect ratio mappings (2560x1080).
-* Congestion statistics display freeze when simulation terminates, preserving peak metrics for presentations.
+### 5. OS Core-Tracking & Hardware Transparency
+
+Sistem melakukan deteksi batas core logis maksimal hardware secara otomatis saat startup menggunakan `omp_get_max_threads()`. Slider thread dibatasi agar tidak melampaui kemampuan hardware. 
+Pada setiap tick simulasi, backend C++ memetakan alokasi thread logis ke CPU Core fisik sesungguhnya menggunakan Windows API `GetCurrentProcessorNumber()` atau Linux `sched_getcpu()`. Data ini dipancarkan via WebSocket JSON sehingga dasbor Worker Monitor dapat merender **Thread ID #X** dan **CPU Core Riil: Y** secara real-time serta berdenyut (*pulse*) mengikuti fase kerja thread (FW COMPUTE atau VEHICLE UPDATE).
 
 ---
 
 ## 📂 Penjelasan Fungsi Setiap Berkas di Proyek Ini
 
-Berikut adalah pemetaan fungsi dari setiap komponen berkas pada proyek hibrida SmartCity Traffic Simulator:
-
 ### A. Komponen Backend (C++ & Build System)
 
-* **[traffic_engine.cpp](traffic_engine.cpp):** Core processing engine simulasi. Bertugas melakukan komputasi berat secara paralel menggunakan OpenMP:
-  * Menghitung rute terpendek Floyd-Warshall (`CALCULATE_FW`).
-  * Mensimulasikan pembaruan posisi kendaraan secara paralel tanpa kunci (*lock-free partitioning*).
-  * Mengatur siklus lampu lalu lintas modulo tick.
-  * Menghitung *Synchronization Overhead Time* dan menyajikan antarmuka I/O perintah stdin/stdout JSON.
-* **[Makefile](Makefile):** Berkas otomasi kompilasi. Menyediakan perintah kompilasi cepat menggunakan G++ MSYS2 dengan optimasi level tinggi (`-O3`) serta pengaktifan pustaka OpenMP (`-fopenmp`) yang aman untuk terminal Windows.
-* **[requirements.txt](requirements.txt):** Berkas dokumentasi yang mencantumkan dependensi sistem perkakas (compiler GCC, Make, Node.js) untuk memandu penataan lingkungan lokal.
-* **[CONCEPT_EXPLANATION.md](CONCEPT_EXPLANATION.md):** Berkas dokumentasi teori, konsep, dan arsitektur simulasi hibrida C++ OpenMP dibandingkan dengan model Web Workers lama.
+* **[traffic_engine.cpp](traffic_engine.cpp):** Core processing engine. Menghitung Floyd-Warshall paralel OpenMP, mensimulasikan kendaraan lock-free, mengelola lampu lalu lintas round-robin, dan mengukur Sync Overhead Time.
+* **[Makefile](Makefile):** Otomasi kompilasi G++ MSYS2 dengan optimasi `-O3` dan `-fopenmp`.
+* **[requirements.txt](requirements.txt):** Dokumentasi dependensi sistem (GCC, Make, Node.js).
+* **[CONCEPT_EXPLANATION.md](CONCEPT_EXPLANATION.md):** Dokumentasi teori, konsep, dan arsitektur hibrida.
 
 ### B. Komponen Server & IPC
 
-* **[server.js](server.js):** Server Node.js lokal. Memiliki peran ganda:
-  * Menyajikan berkas front-end (HTML/JS/CSS) dengan header keamanan COOP dan COEP.
-  * Bertindak sebagai WebSocket IPC pipe yang menjembatani browser dengan backend C++. Ia meluncurkan `traffic_engine.exe` sebagai subprocess, mengalirkan perintah dari browser ke C++, serta menyemburkan data koordinat kendaraan dari C++ kembali ke browser.
+* **[server.js](server.js):** Server Node.js lokal — menyajikan front-end dan bertindak sebagai WebSocket IPC pipe ke C++ subprocess.
 
 ### C. Komponen Front-End (Web UI & Client Logic)
 
-* **[index.html](index.html):** Struktur visual dasbor UI simulator bertema premium dark. Menyediakan panel kontrol (pemilihan mode, thread, tick rate), indikator monitor thread, tombol ekspor, tab metrik live, dan tab grafik analisis Hukum Amdahl.
-* **[styles.css](styles.css):** Lembar gaya CSS3 premium yang membungkus antarmuka simulator dengan estetika modern (glassmorphism, skema warna HSL gelap, transisi halus, tata letak grid responsif).
-* **[js/app.js](js/app.js):** Logika utama front-end. Bertugas menghubungkan elemen kontrol tombol HTML UI dengan siklus simulasi, menangkap interaksi klik mouse pada Canvas untuk pemblokiran jalan dinamis, serta menggambar visual grafik Hukum Amdahl menggunakan SVG.
-* **[js/simulation.js](js/simulation.js):** Pengendali status simulasi sisi klien. Berperan mengirimkan pesan WebSocket ke server Node.js, menerima pembaruan koordinat kendaraan dari C++, dan langsung menyuntikkannya ke Shared Memory views lokal.
-* **[js/graph.js](js/graph.js):** Mengatur representasi grafis kota $G=(V,E)$ menggunakan struktur memori bertipe array (Float32/Int32).
-* **[js/renderer.js](js/renderer.js):** Modul visualisasi Canvas 2D. Membaca posisi kendaraan dan status jalan dari Shared Memory untuk merender visual aliran lalu lintas langsung, kilauan lampu lalu lintas (Merah/Hijau), serta gradien kepadatan jalan (density heatmap).
-* **[js/tests.js](js/tests.js):** Modul pengujian diagnostik otomatis. Memverifikasi operasi graf (CRUD), rekonstruksi rute, dan kecocokan matematis 100% matriks Floyd-Warshall Sequential vs Parallel backend C++.
-
-### D. Komponen Konfigurasi IDE (VS Code)
-
-* **[.vscode/c_cpp_properties.json](.vscode/c_cpp_properties.json):** Konfigurasi IntelliSense C++ dasar untuk merujuk pada instalasi MSYS2 UCRT64 G++ lokal.
-* **[.vscode/settings.json](.vscode/settings.json):** Konfigurasi khusus ekstensi clangd untuk mendeteksi compiler driver sehingga pustaka bawaan kompiler MSYS2 dapat dimuat secara mulus tanpa error diagnostic palsu.
-* **[compile_flags.txt](compile_flags.txt):** Berkas parameter kompilasi sisi parser agar editor memahami standar bahasa C++20 dan fitur OpenMP yang digunakan dalam kode.
+* **[index.html](index.html):** Struktur UI dasbor premium dark — panel kontrol, worker monitor, ekspor, tab Live Metrics, tab Scientific Benchmark.
+* **[styles.css](styles.css):** CSS3 glassmorphism premium dengan animasi micro-interaction.
+* **[js/app.js](js/app.js):** Logika utama front-end — kontrol UI, canvas interactions, CSV/JSON export, SVG chart rendering.
+* **[js/simulation.js](js/simulation.js):** Pengendali status simulasi — WebSocket messaging, Shared Memory management.
+* **[js/graph.js](js/graph.js):** Representasi grafis kota $G=(V,E)$ menggunakan typed arrays (Float32/Int32).
+* **[js/renderer.js](js/renderer.js):** Visualisasi Canvas 2D — kendaraan, stop-line indicator traffic lights, heatmap kepadatan.
+* **[js/tests.js](js/tests.js):** Diagnostik otomatis — verifikasi CRUD graf dan konsistensi matriks Floyd-Warshall.
 
 ---
 
 ## 🆕 Fitur & Fungsionalitas Baru (Revisi UAS)
 
-Berikut adalah beberapa fitur baru yang ditambahkan untuk memenuhi kebutuhan analisis performa HPC dan fleksibilitas simulator:
+### 1. Discrete Thread Slider (2, 4, 8, 16 Thread)
+- Slider paralel hanya memperbolehkan nilai **pangkat dua: 2, 4, 8, 16** thread.
+- Angka 1 thread dihapus dari slider paralel — gunakan dropdown **Sequential (Single-Thread)** untuk eksekusi 1-thread murni.
+- Setiap perubahan memicu kalkulasi ulang Floyd-Warshall secara *real-time*.
 
-### 1. Perbaikan Logika Reset (Reset Logic)
-Ketika tombol **Reset** ditekan:
-- Waktu simulasi dihentikan total dan kembali ke **0.0s**.
-- Status simulator kembali ke **STOPPED**.
-- **Data kendaraan dan rute awal tetap dipertahankan**. Kendaraan akan dikembalikan ke posisi koordinat awal/keberangkatan (origin node) dengan progress 0%, travel time 0s, dan state di-reset menjadi Moving. Metrik Live Dashboard (Active, Finished, Throughput, Tick) dikosongkan.
+### 2. Dynamic Worker Thread Activity Monitor
+- **2 atau 4 thread**: Bar progress penuh dengan label IDLE / FW COMPUTE / VEHICLE UPDATE.
+- **8 atau 16 thread**: Compact grid mini-boxes dengan animasi glow pulse yang berkedip real-time mengikuti aktivitas backend C++.
 
-### 2. Desain Peta Manual (Blank Canvas)
-Pengguna dapat memilih preset **Blank Canvas (Manual Map Design)** dari dropdown preset graf. Kanvas akan dikosongkan sepenuhnya (0 Node, 0 Edge).
-- Pengguna dapat beralih ke **Graph Edit Mode** di bagian bawah dasbor untuk menambahkan node dengan mengklik area kosong pada Canvas (**Add Node**).
-- Hubungkan simpul-simpul jalan secara dinamis menggunakan **Add Road** dengan menentukan bobot dan tipe arah (dua arah / satu arah).
-- Proyeksi koordinat Canvas secara otomatis menyesuaikan dengan skala 1:1 terhadap koordinat piksel selama jumlah node di kanvas kurang dari 2 untuk mencegah bug pembagian dengan nol (*division by zero*).
+### 3. Stop-Line Indicator Traffic Lights
+- Lampu lalu lintas divisualisasikan sebagai **garis stop-line** tipis tegak lurus terhadap arah jalan dengan efek glow merah/hijau — elegan dan menyatu dengan tema glassmorphism.
 
-### 3. Spawn Kendaraan Manual (Manual Vehicle Spawner)
-Di bawah menu "Vehicle Spawn Setup", terdapat kontrol manual baru:
-- **Input Angka:** Tentukan berapa banyak kendaraan yang ingin disuntikkan secara dinamis.
-- **Tombol "Spawn Kendaraan":** Mengirim perintah `ADD_VEHICLES` ke backend C++ secara langsung saat simulasi sedang berhenti maupun berjalan. Rute perjalanan otomatis dihitung menggunakan matriks next-hop Floyd-Warshall yang sudah ada.
+### 4. Editor Canvas & Re-routing Kendaraan
+- Klik **Node** → modal spawn kendaraan dari node tersebut.
+- Klik **Edge** → modal edit bobot/status jalan.
+- Klik **Kendaraan** → overlay detail card + tombol edit rute (`UPDATE_VEHICLE` ke C++).
 
-### 4. Ekspor Analisis Performa Komputasi (HPC Analysis CSV)
-Modifikasi tombol **Export Journey CSV** memicu benchmarking real-time pada peta aktif saat ini untuk thread 1, 2, 4, 8, dan 16.
-- Hasil benchmarking tersebut dianalisis dengan rumus HPC standar dan diletakkan di bagian atas file CSV:
-  - **Speedup (S):** $S = \frac{T_{sekuensial}}{T_{paralel}}$
-  - **Efisiensi (E):** $E = \frac{S}{P} \times 100\%$ (di mana $P$ adalah alokasi thread).
-- **Proteksi Multi-Device:** Pengujian thread yang melebihi kapasitas hardware logis CPU lokal (menggunakan fungsi `omp_get_max_threads()`) secara otomatis akan dilewati dan ditandai `"N/A"` untuk mencegah kegagalan eksekusi (*oversubscription* / crash / freeze) di device lain yang memiliki core CPU lebih sedikit.
+### 5. Ekspor CSV Multi-Thread
+- CSV memuat kolom `Travel Time Thread X (s)` terpisah untuk setiap konfigurasi thread yang pernah digunakan dalam satu sesi.
 
+---
+
+## 📑 Pembagian Tugas Kelompok
+Detail kontribusi masing-masing anggota kelompok dapat diakses di dokumen:
+* **[persentasi.md](persentasi.md):** Matriks pembagian tugas dan kontribusi 5 anggota kelompok.

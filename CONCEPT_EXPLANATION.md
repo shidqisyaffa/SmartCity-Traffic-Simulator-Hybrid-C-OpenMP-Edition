@@ -266,56 +266,129 @@ for (int k = 0; k < V; k++) {          // Loop K tetap sekuensial (dependensi da
 
 ---
 
+---
+
 ## 3. Alokasi Thread (Worker Pool)
 
-### 3.1 Apa Itu?
+### 3.0 Mengapa Paralelisme Dibutuhkan? (Analisis O(N³))
 
-Slider **"Alokasi Thread"** mengatur berapa banyak **thread OpenMP** yang digunakan oleh mesin C++ saat mode Parallel aktif. Rentang: **1 sampai 16 thread**.
+Sebelum membahas slider thread, penting memahami **mengapa** paralelisme dibutuhkan dari sudut pandang matematis:
+
+**Floyd-Warshall All-Pairs Shortest Path (APSP)** memiliki kompleksitas waktu **kubik**:
+
+$$T_{seq} = O(N^3) \quad \text{di mana } N = \text{jumlah simpul (vertex) kota}$$
+
+| Ukuran Graf (N) | Jumlah Operasi Matriks | Estimasi Waktu (CPU 1 thread) |
+|:---:|:---:|:---:|
+| N = 49 (Grid 7×7) | ~117.649 ops | < 1 ms |
+| N = 250 | ~15,6 juta ops | ~15–50 ms |
+| N = 1.024 | ~1,07 miliar ops | ~1–5 detik |
+| N = 2.048 | ~8,59 miliar ops | ~10–50 detik |
+
+Pada N ≥ 512, komputasi sequential menjadi **bottleneck nyata** yang menyebabkan:
+- UI Canvas **beku (freeze)** selama perhitungan berlangsung.
+- Respons terhadap perubahan peta (blokir jalan, re-routing) menjadi sangat lambat.
+- WebSocket pipe **blocked**, menyebabkan antrian tick menumpuk.
+
+**Solusi:** Dengan P thread paralel, kompleksitas komputasi murni per thread terpangkas menjadi:
+$$T_{par} \approx \frac{O(N^3)}{P}$$
+
+### 3.1 Apa Itu Slider Alokasi Thread?
+
+Slider **"Alokasi Thread"** mengatur berapa banyak **thread OpenMP** yang digunakan oleh mesin C++ saat mode Parallel aktif. Menggunakan skema diskrit pangkat dua: **2, 4, 8, dan 16 thread** (snapping slider). Hal ini bertujuan untuk:
+- Meminimalkan **Load Imbalance** pada pengolahan graf biner (thread ganjil memecah partisi secara tidak rata).
+- Memaksimalkan efisiensi pemrosesan paralel pada CPU multi-core.
+- **Angka 1** tidak tersedia di slider paralel — gunakan dropdown **Sequential (Single-Thread)** untuk eksekusi 1-thread murni dan perbandingan baseline.
 
 ### 3.2 Cara Kerjanya
 
-Saat user mengatur slider ke nilai N:
-1. Nilai `sim.numThreads = N` disimpan di frontend
-2. Setiap kali perintah dikirim ke C++ (`CALCULATE_FW parallel N ...` atau `TICK_REQUEST parallel N ...`), nilai N dikirimkan
-3. Di C++, fungsi `omp_set_num_threads(N)` dipanggil sebelum region paralel
-4. OpenMP membagi loop ke N thread yang berjalan bersamaan
+Saat user mengatur slider ke nilai N (dipetakan dari indeks slider 0–3 ke nilai [2, 4, 8, 16]):
+1. Nilai `sim.numThreads = N` disimpan di frontend.
+2. Setiap kali slider diubah, browser langsung memicu re-kalkulasi Floyd-Warshall secara *real-time* di backend C++.
+3. Di C++, fungsi `omp_set_num_threads(N)` dipanggil sebelum region paralel.
+4. OpenMP membagi loop ke N thread yang berjalan bersamaan di core fisik CPU.
+
+**Dekomposisi Data (Data Decomposition):**
+```
+Untuk N=4 thread, matriks NxN dibagi menjadi 4 strip horizontal:
+  Thread 0: baris 0 – N/4-1
+  Thread 1: baris N/4 – N/2-1
+  Thread 2: baris N/2 – 3N/4-1
+  Thread 3: baris 3N/4 – N-1
+
+Setiap thread membaca baris k (shared, read-only) dan menulis
+baris-barisnya sendiri (private) → tidak ada race condition.
+```
 
 ### 3.3 Pengaruh Pengaturan Rendah vs Tinggi
 
 | Thread | Dampak | Kapan Cocok |
 | :---: | :--- | :--- |
-| **1 thread** | Sama persis seperti sequential — hanya 1 core bekerja. Overhead OpenMP masih ada (bikin region paralel) tapi tidak ada pembagian kerja nyata. | Untuk membandingkan overhead murni OpenMP tanpa manfaat paralelisme |
-| **2 thread** | Pekerjaan dibagi 2, speedup ~1.5–1.8x. Overhead sinkronisasi minimal. | Graph menengah (50–150 node), laptop dual-core |
-| **4 thread** | Sweet spot untuk kebanyakan CPU modern. Speedup ~2.5–3.5x. Balance antara percepatan dan overhead. | **Rekomendasi default.** Cocok untuk hampir semua skenario |
-| **8 thread** | Speedup ~3–6x untuk graph besar. Tapi overhead barrier mulai terasa. | Graph besar (250+ node), CPU 8-core |
-| **16 thread** | Speedup bisa stagnan atau bahkan menurun (*diminishing returns*). Overhead sinkronisasi tinggi karena 16 thread harus menunggu di barrier setiap iterasi K. | Hanya untuk eksperimen benchmark, CPU server 16+ core |
+| **2 thread** | Pekerjaan dibagi 2, speedup ~1.5–1.8x pada graph besar. Overhead sinkronisasi minimal. | Graph menengah (50–150 node), laptop dual-core |
+| **4 thread** | Sweet spot untuk kebanyakan CPU modern. Speedup ~2.5–3.5x pada N≥250. Balance antara percepatan dan overhead. | **Rekomendasi default.** Cocok untuk hampir semua skenario |
+| **8 thread** | Speedup ~3–6x untuk graph besar. Selaras dengan jumlah **core fisik** AMD Ryzen 7 5700X. Optimal karena setiap core mengerjakan satu thread penuh. | Graph besar (250+ node), CPU 8-core |
+| **16 thread** | Speedup bisa stagnan atau menurun (*diminishing returns*) akibat **Memory Bandwidth Bottleneck** dan **Synchronization Overhead** yang tinggi. | Hanya untuk eksperimen benchmark, CPU server |
 
-### 3.4 Mengapa Terjadi Diminishing Returns?
+### 3.4 Mengapa 16 Thread Bisa Lebih Lambat? (Memory Bandwidth Bottleneck)
 
+Fenomena ini terjadi karena **dua mekanisme berlapis** pada arsitektur modern:
+
+**A. SMT (Simultaneous Multi-Threading / Hyperthreading)**
 ```
-Speedup teoritis (Hukum Amdahl):
-    S(P) = 1 / (f + (1-f)/P)
+CPU Ryzen 7 5700X:
+  Core Fisik: 8
+  Thread Logis (SMT): 16
 
-    f = fraksi serial yang TIDAK bisa diparalelkan
-    P = jumlah thread
-
-Contoh: jika f = 10% (10% kode harus serial):
-    S(4)  = 1/(0.1 + 0.9/4)  = 3.08x
-    S(8)  = 1/(0.1 + 0.9/8)  = 4.71x
-    S(16) = 1/(0.1 + 0.9/16) = 6.40x
-    S(∞)  = 1/0.1             = 10x (batas maksimum!)
+Pada P=16, dua thread virtual berbagi:
+  - Register fisik yang sama
+  - Pipeline eksekusi yang sama
+  - Cache L1 (32KB) dan L2 (512KB) yang sama per core
 ```
 
-Semakin banyak thread:
-- Semakin banyak waktu terbuang untuk **membuat thread, sinkronisasi barrier, dan mengumpulkan hasil**
-- Loop K pada Floyd-Warshall **harus** sekuensial (dependensi data), ini membatasi paralelisme
-- Fase reduksi persimpangan di vehicle update **selalu sekuensial**
+**B. Memory Bandwidth Bottleneck**
+```
+Matriks Floyd-Warshall berukuran N×N × 4 bytes (float):
+  N=1024: 4 MB per matriks (dist + next)
+
+Pada P=16 vs P=8:
+  - Laju akses memori meningkat 2× → bandwidth DDR4 tersaturasi
+  - Cache miss rate meningkat → latensi akses naik
+  - Thread saling evict data dari cache L2/L3 satu sama lain
+```
+
+**C. Synchronization Overhead Berlipat**
+```
+Setiap iterasi K pada Floyd-Warshall membutuhkan barrier:
+  #pragma omp barrier  ← semua thread menunggu di sini!
+
+Dengan 16 thread, thread tercepat menunggu thread terlambat:
+  Waktu tunggu ≈ max(T_thread) - min(T_thread)
+
+Pada V=49: overhead barrier > waktu komputasi aktual
+→ Speedup < 1 (lebih lambat dari sequential!)
+```
+
+**Hukum Amdahl (Batas Speedup Teoritis):**
+```
+S(P) = 1 / [f + (1-f)/P]
+
+f = fraksi kode yang TIDAK bisa diparalelkan
+    (loop K Floyd-Warshall, fase reduksi intersection, I/O)
+
+Contoh nyata (f ≈ 30% karena overhead kecil V=49):
+  S(2)  = 1/(0.30 + 0.70/2)  = 1.54x  → tapi overhead > benefit
+  S(4)  = 1/(0.30 + 0.70/4)  = 2.11x  → masih kalah overhead
+  S(8)  = 1/(0.30 + 0.70/8)  = 2.58x  → near Amdahl ceiling
+  S(16) = 1/(0.30 + 0.70/16) = 2.84x  → marginal gain, overhead besar
+```
 
 ### 3.5 Pengaruh di Dashboard
 
-- **Worker Thread Activity Monitor**: Menampilkan bar status per thread (IDLE / FW COMPUTE / VEHICLE UPDATE)
-- **Synchronization Overhead**: Semakin banyak thread, nilai ini cenderung **lebih tinggi**
-- **FW Execution Time**: Semakin banyak thread, nilai ini cenderung **lebih rendah** (sampai titik optimal)
+- **Worker Thread Activity Monitor**:
+  - **2 atau 4 thread**: Menampilkan bar progress penuh per worker dengan label status (IDLE / FW COMPUTE / VEHICLE UPDATE).
+  - **8 atau 16 thread**: Tampilan berubah otomatis ke **compact mini-grid** (4 kolom untuk 16T, 2 kolom untuk 8T) dengan animasi glow pulse yang berkedip real-time mengikuti aktivitas backend C++.
+- **Synchronization Overhead**: Semakin banyak thread, nilai ini cenderung **lebih tinggi**.
+- **FW Execution Time**: Semakin banyak thread (hingga sweet spot 8T), nilai ini cenderung **lebih rendah**.
 
 ---
 
@@ -690,10 +763,10 @@ Setiap kali topologi graf dimodifikasi di frontend (penambahan/penghapusan node 
 
 ### 10.2 Data Export Modules
 
-| Tombol | Fungsi | Format File |
+| Tombol | Fungsi | Format File & Rincian Data |
 | :--- | :--- | :--- |
-| **Export Journey CSV** | Mengunduh data perjalanan seluruh kendaraan | `.csv` berisi: Vehicle ID, Tipe, State, Origin, Destination, Progress %, Travel Time |
-| **Export Graph JSON** | Mengunduh konfigurasi graph (node, edge, bobot, status blokir) | `.json` berisi: array nodes (id, x, y) dan edges (from, to, weight, blocked, isTwoWay) |
+| **Export Journey CSV** | Mengunduh data perjalanan seluruh kendaraan dan tabel perbandingan kinerja multithreading. | **.csv** terbagi menjadi dua bagian:<br>1. **Computational Performance Table**: Data waktu eksekusi Floyd-Warshall yang di-generate via benchmark instan saat tombol diklik. Membaca skenario genap pangkat dua: **2, 4, 8, dan 16 thread**. Dilengkapi proteksi hardware: jika thread melebihi batas logic CPU, skenario dilewati aman (`0.0ms`) tanpa membuat sistem freeze.<br>2. **Vehicle Journey Statistics**: Menggunakan data riil hasil rekaman simulasi aktif (Live Session) tanpa simulasi terisolasi tambahan. Menjamin kejujuran data perjalanan di hadapan penguji. |
+| **Export Graph JSON** | Mengunduh konfigurasi graph yang sedang dimodifikasi secara real-time. | **.json** berisi: koordinat node (id, x, y), status bobot (*road weight*) yang di-update, serta status pemblokiran jalan (*blocked/unblocked*). Menjamin topologi yang diekspor 100% mewakili modifikasi interaktif pengguna. |
 
 ---
 
