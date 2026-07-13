@@ -1,3 +1,4 @@
+#define NOMINMAX
 #include <iostream>
 #include <string>
 #include <vector>
@@ -357,9 +358,6 @@ void runSequentialVehicles(float tickRate, double& out_exec_time) {
         float delayCounter = vehicleFloats[vOffset + 7];
 
         travelTime += dt;
-        if (i * 5 < (int)vehicleThreadTimes.size()) {
-            vehicleThreadTimes[i * 5 + 0] += dt; // Thread 1 for sequential
-        }
 
         if (state == 2) {
             delayCounter -= dt;
@@ -464,6 +462,15 @@ void runSequentialVehicles(float tickRate, double& out_exec_time) {
 
     auto t_end = std::chrono::high_resolution_clock::now();
     out_exec_time = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+
+    for (int i = 0; i < totalVehicles; ++i) {
+        int state = vehicleInts[i * 8 + 2];
+        if (state == 1 || state == 2 || state == 3) {
+            if (i * 5 < (int)vehicleThreadTimes.size()) {
+                vehicleThreadTimes[i * 5 + 0] += (float)out_exec_time;
+            }
+        }
+    }
 }
 
 // Parallel vehicle simulation step with lock-free partitioning + reduction
@@ -539,15 +546,6 @@ void runParallelVehicles(int threads, float tickRate, double& out_exec_time, dou
             float delayCounter = vehicleFloats[vOffset + 7];
 
             travelTime += dt;
-            int t_idx = -1;
-            if (threads == 1) t_idx = 0;
-            else if (threads == 2) t_idx = 1;
-            else if (threads == 4) t_idx = 2;
-            else if (threads == 8) t_idx = 3;
-            else if (threads == 16) t_idx = 4;
-            if (t_idx != -1 && i * 5 + t_idx < (int)vehicleThreadTimes.size()) {
-                vehicleThreadTimes[i * 5 + t_idx] += dt;
-            }
 
             if (state == 2) {
                 delayCounter -= dt;
@@ -672,6 +670,24 @@ void runParallelVehicles(int threads, float tickRate, double& out_exec_time, dou
         total_overhead += (out_exec_time - thread_work_time[t]);
     }
     out_sync_overhead = std::max(0.0, total_overhead / num_threads);
+
+    int t_idx = -1;
+    if (threads == 1) t_idx = 0;
+    else if (threads == 2) t_idx = 1;
+    else if (threads == 4) t_idx = 2;
+    else if (threads == 8) t_idx = 3;
+    else if (threads == 16) t_idx = 4;
+
+    if (t_idx != -1) {
+        for (int i = 0; i < totalVehicles; ++i) {
+            int state = vehicleInts[i * 8 + 2];
+            if (state == 1 || state == 2 || state == 3) {
+                if (i * 5 + t_idx < (int)vehicleThreadTimes.size()) {
+                    vehicleThreadTimes[i * 5 + t_idx] += (float)out_exec_time;
+                }
+            }
+        }
+    }
 }
 
 // Runs scientific benchmark on 250 nodes
@@ -1100,11 +1116,6 @@ int main() {
                 vehicleFloats[vOffset + 3] = coords[origin * 2];
                 vehicleFloats[vOffset + 4] = coords[origin * 2 + 1];
                 vehicleFloats[vOffset + 7] = 0.0f; // delay
-
-                // Reset thread travel times
-                for (int t = 0; t < 5; ++t) {
-                    vehicleThreadTimes[i * 5 + t] = 0.0f;
-                }
             }
             std::stringstream response;
             response << std::fixed << std::setprecision(4);

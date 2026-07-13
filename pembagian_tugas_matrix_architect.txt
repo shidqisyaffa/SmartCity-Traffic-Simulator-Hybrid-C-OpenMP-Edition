@@ -1,0 +1,145 @@
+================================================================================
+           PANDUAN TANYA-JAWAB (Q&A) & PEMBAGIAN TUGAS MATRIX ARCHITECT I & II
+     Proyek Akhir: SmartCity Traffic Simulator (Hybrid C++ OpenMP Edition)
+================================================================================
+
+Halo! Berkas ini dirancang khusus sebagai panduan belajar sekaligus "contekan" 
+siap saji untuk kalian berdua (Matrix Architect I & II) saat presentasi UAS atau 
+jika ditanya oleh dosen penguji. 
+
+Isi berkas ini telah diselaraskan dengan instruksi dosen tentang pembagian 
+tugas Matrix Architect, khususnya mengenai konsep "Pembagian Baris Matriks" 
+(Block-Row Partitioning) pada Floyd-Warshall paralel.
+
+================================================================================
+PART 1: MATRIX ARCHITECT I (Algoritma Paralelisasi & Logika Simulasi C++)
+================================================================================
+Fokus Utama: Logika pemrosesan paralel OpenMP pada algoritma graf & simulasi objek.
+
+--------------------------------------------------------------------------------
+Daftar Pertanyaan Ujian & Jawaban Siap Saji:
+--------------------------------------------------------------------------------
+
+Tanya 1: Dosen menyebutkan tentang "pembagian baris matriks" (Block-Row Partitioning) 
+         seperti pada perkalian matriks paralel atau MPI. Bagaimana konsep ini 
+         diterapkan di OpenMP proyek kalian?
+Jawab  : Konsep pembagian baris matriks diimplementasikan langsung pada loop 'i' 
+         (yang mewakili indeks baris dari matriks jarak graf). 
+         Melalui direktif '#pragma omp for schedule(dynamic)', OpenMP membagi baris-baris 
+         matriks ini kepada thread-thread yang aktif secara dinamis. 
+         Perbedaannya dengan pendekatan MPI (Distributed Memory) adalah:
+         - Pada MPI: Setiap proses memiliki memori terpisah, sehingga baris ke-k harus 
+           dikirimkan (broadcast/scatter) ke proses lain pada setiap iterasi k agar 
+           bisa dibaca.
+         - Pada OpenMP (Shared Memory): Karena semua thread berbagi memori yang sama, 
+           pembagian baris matriks (indeks i) hanya perlu dilakukan untuk beban menulis 
+           (update baris), sedangkan data baris ke-k ('fwDistance[k * MAX_VERTICES + j]') 
+           dapat dibaca langsung oleh semua thread tanpa memicu race condition dan tanpa 
+           perlu dikirim manual lewat jaringan/pesan.
+Kode Ref: traffic_engine.cpp (Baris 261 - 282)
+
+Tanya 2: Mengapa algoritma Floyd-Warshall dalam 'runParallelFW' diparalelkan pada 
+         loop tengah (i) dan bukan pada loop terluar (k)?
+Jawab  : Loop terluar 'k' mewakili node perantara (intermediary node) dalam 
+         proses relaksasi graf. Hasil perhitungan pada langkah 'k' sangat 
+         bergantung pada hasil dari langkah 'k-1' (ada dependensi data berurutan). 
+         Jika loop 'k' diparalelkan, akan terjadi Race Condition yang parah dan 
+         rute terpendek akan salah. Oleh karena itu, loop 'k' harus berjalan secara 
+         sekuensial (satu per satu), sedangkan loop tengah 'i' aman diparalelkan 
+         karena pemrosesan baris matriks untuk setiap node asal bersifat independen.
+Kode Ref: traffic_engine.cpp (Baris 253 - 287)
+
+Tanya 3: Mengapa Anda menggunakan 'schedule(dynamic)' pada loop Floyd-Warshall paralel, 
+         dan bukan 'schedule(static)'?
+Jawab  : Pada Floyd-Warshall paralel, beban kerja komputasi di setiap iterasi 'i' 
+         tidak merata karena kondisi percabangan graf (ada jalan yang diblokir/tidak aktif). 
+         Dengan 'dynamic scheduling', OpenMP membagikan iterasi ke thread secara dinamis 
+         begitu thread tersebut selesai bekerja. Hal ini sangat efektif mencegah terjadinya 
+         "Load Imbalance" (situasi di mana satu thread sudah selesai tapi terpaksa 
+         menganggur lama menunggu thread lain yang masih sibuk memproses jalur rumit).
+Kode Ref: traffic_engine.cpp (Baris 261)
+
+Tanya 4: Bagaimana Anda meminimalkan bottleneck sinkronisasi (menerapkan metode 
+         Lock-Free) saat memperbarui ribuan kendaraan secara paralel?
+Jawab  : Kami membagi array kendaraan secara linier kepada thread OpenMP secara merata 
+         menggunakan '#pragma omp for schedule(static)'. Setiap thread memperbarui 
+         status kendaraan miliknya secara independen tanpa saling bertabrakan.
+         Untuk antrean lampu merah di persimpangan, alih-alih menggunakan kunci (lock/mutex) 
+         global yang lambat, setiap thread menyimpan kandidat kendaraan terdepannya di array 
+         lokal 'thread_candidates[tid * MAX_VERTICES + v]'. Setelah loop paralel selesai, 
+         satu thread utama melakukan "Reduction Phase" secara sekuensial untuk memilih 
+         kendaraan mana yang boleh menyeberang persimpangan terlebih dahulu. 
+         Ini meniadakan busy-waiting lock contention yang parah.
+Kode Ref: traffic_engine.cpp (Baris 517 - 668)
+
+Tanya 5: Kapan fungsi 'rerouteActiveVehicles' dijalankan, dan mengapa ada kondisi 
+         'if(totalVehicles > 500)' di dalam direktif OpenMP-nya?
+Jawab  : Fungsi ini dipanggil ketika graf jalan diubah di frontend (misal pengguna menutup 
+         jalan secara real-time), sehingga rute kendaraan aktif harus diperbarui seketika. 
+         Kondisi 'if(totalVehicles > 500)' digunakan untuk mengevaluasi efisiensi. 
+         Jika jumlah kendaraan di bawah 500, overhead untuk membuat dan mensinkronkan 
+         thread OpenMP justru lebih besar daripada waktu komputasi sekuensial biasa. Maka, 
+         paralelisasi hanya diaktifkan jika jumlah kendaraan cukup banyak (di atas 500).
+Kode Ref: traffic_engine.cpp (Baris 803)
+
+
+================================================================================
+PART 2: MATRIX ARCHITECT II (Infrastruktur Waktu, Telemetry Hardware, & Build)
+================================================================================
+Fokus Utama: Pengukuran waktu presisi tinggi, pelacakan arsitektur hardware, & Makefile.
+
+--------------------------------------------------------------------------------
+Daftar Pertanyaan Ujian & Jawaban Siap Saji:
+--------------------------------------------------------------------------------
+
+Tanya 1: Bagaimana Anda melacak dan memetakan Thread ID serta CPU Core fisik secara 
+         real-time ke layar frontend?
+Jawab  : Di dalam blok paralel OpenMP, kami mengambil Thread ID unik dengan fungsi 
+         'omp_get_thread_num()'. Untuk mengetahui core CPU fisik mana yang sedang memproses 
+         thread tersebut pada saat itu, kami menggunakan fungsi 'getCurrentCpuCore()' 
+         yang bersifat lintas-platform:
+         - Pada sistem Windows: Menggunakan API bawaan sistem yaitu 'GetCurrentProcessorNumber()'.
+         - Pada sistem Linux: Menggunakan API sistem 'sched_getcpu()'.
+         Data ini disimpan dalam array 'lastThreadCores' lalu dikirimkan via JSON ke 
+         frontend WebSocket untuk digambar pada dashboard monitor thread.
+Kode Ref: traffic_engine.cpp (Baris 23 - 30)
+
+Tanya 2: Bagaimana cara Anda mengukur durasi waktu komputasi dan apa itu 
+         "Synchronization Overhead"?
+Jawab  : Kami mengukur durasi dengan pustaka '<chrono>' C++ menggunakan objek 
+         'std::chrono::high_resolution_clock'. Waktu diukur sesaat sebelum loop paralel 
+         dimulai (t_start) dan sesudah loop berakhir (t_end).
+         "Synchronization Overhead" adalah selisih rata-rata waktu tunggu antar-thread 
+         akibat adanya pembatas sinkronisasi (barrier) di OpenMP. Ini dihitung dengan cara 
+         mengurangi total waktu eksekusi global dengan total waktu aktif thread bekerja 
+         (work time). Formulanya: 'Overhead = Execution_Time - Thread_Work_Time'.
+Kode Ref: traffic_engine.cpp (Baris 292 - 296 & Baris 670 - 674)
+
+Tanya 3: Jelaskan fungsi dari flag kompiler yang didefinisikan dalam Makefile!
+Jawab  : Makefile kami mengonfigurasi kompilasi kode dengan flag optimasi penting:
+         * CXX = g++ : Menggunakan kompiler GCC/G++ sebagai driver utama.
+         * -O3 : Level optimasi kode paling agresif dari GCC (melakukan vectorization, 
+           loop unrolling, dan inlining otomatis) untuk performa maksimum.
+         * -fopenmp : Mengaktifkan parser OpenMP agar direktif '#pragma omp' diproses.
+         * -std=c++20 : Menggunakan standar bahasa C++ modern (versi 2020).
+         * -static -static-libgcc -static-libstdc++ : Melakukan static compilation. 
+           Seluruh dependensi library runtime C++ ditanam langsung ke file 
+           'traffic_engine.exe', sehingga file exe ini mandiri dan bisa dijalankan langsung 
+           di komputer dosen tanpa perlu menginstal MSYS2/MinGW compiler.
+Kode Ref: Makefile (Baris 5)
+
+================================================================================
+ALUR INTEGRASI: BAGAIMANA MATRIX I & II SALING BERHUBUNGAN
+================================================================================
+Saat presentasi, dosen mungkin bertanya "Bagaimana kalian berdua berkolaborasi?".
+Jawabannya adalah:
+1. Matrix Architect I berfokus merancang algoritma paralel (Floyd-Warshall & update kendaraan) 
+   untuk membagi beban matriks jalan ke thread-thread.
+2. Matrix Architect II menanamkan instrumentasi waktu (chrono) dan deteksi core hardware 
+   (telemetry) ke dalam algoritma tersebut agar kinerjanya bisa diukur secara ilmiah.
+3. Matrix Architect II merancang Makefile dengan optimasi agresif (-O3 dan -fopenmp) agar 
+   logika paralel dari Matrix Architect I terkompilasi dengan efisiensi hardware maksimum.
+4. Data waktu dan telemetri core CPU yang dikumpulkan dikirim ke frontend Node.js 
+   untuk dianalisis oleh Performance Analyst dan digambar oleh Graph Architect.
+
+================================================================================

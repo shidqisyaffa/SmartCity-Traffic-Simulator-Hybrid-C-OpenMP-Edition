@@ -40,11 +40,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   const canvas = document.getElementById("sim-canvas");
   const renderer = new CanvasRenderer(canvas, sim);
   
-  sim.allowedThreadValues = [2, 4, 8, 16]; // default
+  sim.allowedThreadValues = [1, 2, 4, 8, 16]; // default
   sim.onHardwareDetect = (maxThreads) => {
-    const threadValues = [2, 4, 8, 16];
+    const threadValues = [1, 2, 4, 8, 16];
     const allowed = threadValues.filter(v => v <= maxThreads);
-    if (allowed.length === 0) allowed.push(2);
+    if (allowed.length === 0) allowed.push(1);
     sim.allowedThreadValues = allowed;
     
     threadSlider.min = 0;
@@ -734,8 +734,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Sync dashboard values
   function updateDashboardMetrics(metrics = null) {
     // 1. Timeline & Progress calculations
-    const timeVal = sim.tickCount * (sim.tickRate / 1000);
-    metricTime.textContent = timeVal.toFixed(1) + "s";
+    metricTime.textContent = sim.cumulativeExecTime.toFixed(2) + " ms";
 
     let finishedCount = 0;
     if (metrics) {
@@ -1353,7 +1352,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Section 2: Vehicle Journey Statistics
     csvContent += "--- VEHICLE JOURNEY STATISTICS ---\n";
-    csvContent += "Vehicle ID,Vehicle Type,State Code,Origin,Destination,Progress (%),Travel Time Thread 1 (s),Travel Time Thread 2 (s),Travel Time Thread 4 (s),Travel Time Thread 8 (s),Travel Time Thread 16 (s)\n";
+    csvContent += "Vehicle ID,Vehicle Type,State Code,Origin,Destination,Progress (%),Execution Time Thread 1 (ms),Execution Time Thread 2 (ms),Execution Time Thread 4 (ms),Execution Time Thread 8 (ms),Execution Time Thread 16 (ms)\n";
 
     for (let i = 0; i < sim.totalVehicles; i++) {
       const offset = i * 8;

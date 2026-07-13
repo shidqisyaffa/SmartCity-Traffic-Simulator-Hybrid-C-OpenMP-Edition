@@ -18,6 +18,7 @@ export class Simulation {
     this.maxHardwareThreads = 4; // default fallback
     this.threadCores = [];
     this.threadStates = [];
+    this.cumulativeExecTime = 0;
     
     // Performance metrics
     this.metrics = {
@@ -235,6 +236,7 @@ export class Simulation {
     this.metrics.throughput = 0;
     this.resetSessionMetrics();
     this.vehicleThreadTimes = null;
+    this.cumulativeExecTime = 0;
   }
 
   /**
@@ -255,32 +257,36 @@ export class Simulation {
    * Compiles the averages of all measured session execution times per thread allocation.
    */
   getSessionAverages() {
-    const avg = (arr) => arr.length > 0 ? arr.reduce((a,b)=>a+b, 0) / arr.length : 0;
-    
-    const seqFw = avg(this.sessionMetrics.seqFwTimes);
-    const seqUpdate = avg(this.sessionMetrics.seqUpdateTimes);
-    
     const result = {
       status: "success",
-      seq_time: seqFw + seqUpdate, // Total sequential time
-      seq_fw: seqFw,
-      seq_update: seqUpdate,
+      seq_time: 0,
       threads: [1, 2, 4, 8, 16],
-      times: [],
-      overheads: []
+      times: [0, 0, 0, 0, 0],
+      overheads: [0, 0, 0, 0, 0]
     };
     
-    for (const t of result.threads) {
-      const fwAvg = avg(this.sessionMetrics.fwTimes[t]);
-      const updateAvg = avg(this.sessionMetrics.updateTimes[t]);
-      const totalAvg = fwAvg + updateAvg;
-      
+    // Calculate max vehicle travel/execution time for each thread
+    if (this.vehicleThreadTimes && this.totalVehicles > 0) {
+      for (let tIdx = 0; tIdx < 5; tIdx++) {
+        let maxTime = 0;
+        for (let i = 0; i < this.totalVehicles; i++) {
+          const tVal = this.vehicleThreadTimes[i * 5 + tIdx];
+          if (tVal > maxTime) {
+            maxTime = tVal;
+          }
+        }
+        result.times[tIdx] = maxTime;
+      }
+      result.seq_time = result.times[0]; // Thread 1 is sequential time
+    }
+    
+    // Maintain overhead ratios relative to execution times
+    const avg = (arr) => arr.length > 0 ? arr.reduce((a,b)=>a+b, 0) / arr.length : 0;
+    for (let i = 0; i < result.threads.length; i++) {
+      const t = result.threads[i];
       const fwOverhead = avg(this.sessionMetrics.fwOverheads[t]);
       const updateOverhead = avg(this.sessionMetrics.updateOverheads[t]);
-      const totalOverhead = fwOverhead + updateOverhead;
-      
-      result.times.push(totalAvg);
-      result.overheads.push(totalOverhead);
+      result.overheads[i] = (fwOverhead + updateOverhead) * (this.tickCount || 1);
     }
     
     return result;
@@ -424,6 +430,7 @@ export class Simulation {
     const response = await this.sendRequest(`TICK_REQUEST ${this.mode} ${this.numThreads} ${this.tickRate}`, "TICK");
 
     this.tickCount = response.tickCount;
+    this.cumulativeExecTime += response.exec_time;
     const ints = response.vehicleInts;
     const floats = response.vehicleFloats;
     const activeNodesData = response.activeNodes;
@@ -571,6 +578,7 @@ export class Simulation {
   async reset() {
     this.state = "stopped";
     this.tickCount = 0;
+    this.cumulativeExecTime = 0;
 
     try {
       const response = await this.sendRequest("RESET", "RESET");
